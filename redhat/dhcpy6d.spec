@@ -4,7 +4,7 @@
 %{!?python_sitelib: %global python_sitelib %(%{__python} -c "from distutils.sysconfig import get_python_lib; print(get_python_lib())")}
 
 Name:              dhcpy6d
-Version: 0.3.99
+Version: 0.4.99
 Release:           1%{?dist}
 Summary:           DHCPv6 server daemon
 
@@ -132,6 +132,7 @@ fi
 #%{_mandir}/man8/dhcpy6d.8
 %{_sbindir}/%{name}
 %{python_sitelib}/*dhcpy6*
+%{python_sitelib}/*pyroute2*
 %config(noreplace) %{_sysconfdir}/logrotate.d/%{name}
 %config(noreplace) %{_sysconfdir}/%{name}.conf
 %exclude %{_localstatedir}/log/%{name}.log

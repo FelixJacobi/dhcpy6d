@@ -1,6 +1,7 @@
 # necessary because of buggy distutils
 include Changelog
 include dhcpy6d
+include pyroute2
 include doc/LICENSE
 include doc/clients-example.conf
 include doc/config.sql
