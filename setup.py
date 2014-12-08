@@ -71,9 +71,10 @@ setup(name = 'dhcpy6d',
     author_email = 'h.wahl@ifw-dresden.de',
     url = 'https://dhcpy6d.ifw-dresden.de',
     download_url = 'https://dhcpy6d.ifw-dresden.de/download',
-    py_modules = ['dhcpy6.Helpers', 'dhcpy6.Constants',
-                'dhcpy6.Config', 'dhcpy6.Storage'],
-    packages = ['pyroute2'],
+    py_modules = ['dhcpy6.Helpers', 'dhcpy6.Constants', 'dhcpy6.Config', 'dhcpy6.Storage'],
+    packages = ['pyroute2', 'pyroute2.netlink', 'pyroute2.ipdb',
+                'pyroute2.netlink.generic', 'pyroute2.netlink.ipq',
+                'pyroute2.netlink.nfnetlink', 'pyroute2.netlink.rtnl', 'pyroute2.netlink.taskstats'],
     data_files = data_files_custom,
     scripts = scripts_custom\
     )
