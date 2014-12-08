@@ -51,6 +51,11 @@ from dhcpy6.Constants import *
 from dhcpy6.Config import *
 from dhcpy6.Storage import *
 
+# testing neighbor cache access via pyroute2
+from pyroute2 import IPRoute
+import pprint
+ip = IPRoute()
+
 # create and read config file
 cfg = Config()
 
@@ -629,12 +634,25 @@ def CollectMACs():
         if a client has a new MAC the LLIP changes - with privacy extension enabled anyway
         calls local ip command to get neighbor cache - any more sophisticated idea is welcome!
     
-        The Linux netlink method is considered stable now.
+        The Linux netlink method is considered stable now - tested here with pyroute2.
     """
     try:
         # Linux can use kernel neighbor cache
         if OS == "Linux":
-            for host in GetNeighborCacheLinux(cfg, IF_NAME, IF_NUMBER, LIBC, log).values():
+            for h in [x for x in ip.get_neighbors(family=10) if x['ifindex'] in IF_NUMBER and\
+                                                                x.get_attr("NDA_DST").startswith("fe80:")]:
+                host = NeighborCacheRecord(llip= DecompressIP6(h.get_attr("NDA_DST")),
+                                           mac=h.get_attr("NDA_LLADDR"),
+                                           interface=h["ifindex"])
+                if not CollectedMACs.has_key(host.llip):
+                    CollectedMACs[str(host.llip)] = host
+                    if cfg.LOG_MAC_LLIP == True:
+                        log.info("Collected MAC %s for LinkLocalIP %s" % (host.mac, ColonifyIP6(host.llip)))
+                    if cfg.CACHE_MAC_LLIP == True:
+                        volatilestore.store_mac_llip(host.mac, host.llip)
+            """
+            #for host in GetNeighborCacheLinux(cfg, IF_NAME, IF_NUMBER, LIBC, log).values():
+            for host in GetNeighborCacheLinux(cfg, IF_NUMBER, log).values():
                 if host.interface not in cfg.INTERFACE:
                     continue
                 if not CollectedMACs.has_key(host.llip) and host.llip.lower().startswith("fe80"):
@@ -643,6 +661,7 @@ def CollectMACs():
                         log.info("Collected MAC %s for LinkLocalIP %s" % (host.mac, ColonifyIP6(host.llip)))
                     if cfg.CACHE_MAC_LLIP == True:
                         volatilestore.store_mac_llip(host.mac, host.llip)
+            """
         else:
             # subject to change - other distros might have other paths - might become a task
             # for a setup routine to find appropriate paths
