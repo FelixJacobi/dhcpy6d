@@ -53,8 +53,7 @@ from dhcpy6.Storage import *
 
 # testing neighbor cache access via pyroute2
 from pyroute2 import IPRoute
-import pprint
-ip = IPRoute()
+sip = IPRoute()
 
 # create and read config file
 cfg = Config()
