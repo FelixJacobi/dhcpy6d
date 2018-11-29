@@ -1,3 +1,9 @@
+dhcpy6d (0.7.99-7+stsbl-immediately1) experimental; urgency=medium
+
+  * Snapshot release of current changes 
+
+ -- Felix Jacobi <Felix@jacobi-hamburg.net>  Fri, 30 Nov 2018 00:45:08 +0100
+
 dhcpy6d (0.7.99-7) stable; urgency=medium
 
   * New upstream release
