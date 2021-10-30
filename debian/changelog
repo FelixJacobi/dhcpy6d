@@ -1,3 +1,9 @@
+dhcpy6d (1.0.8-1~stsblbpo11+1) bullseye-stable; urgency=medium
+
+  * Rebuild for bullseye-backports.
+
+ -- Felix Jacobi <Felix@jacobi-hamburg.net>  Sat, 30 Oct 2021 02:59:11 +0200
+
 dhcpy6d (1.0.8-1) stable; urgency=medium
 
   * New upstream release
