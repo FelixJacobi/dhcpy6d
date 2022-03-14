@@ -1,3 +1,10 @@
+dhcpy6d (1.1-20211229+stsbl1) buster-unstable; urgency=medium
+
+  * New experimental release including option `route_link_local` in
+    dhcpy6d-client.conf 
+
+ -- Felix Jacobi <Felix@jacobi-hamburg.net>  Mon, 14 Mar 2022 04:26:18 +0100
+
 dhcpy6d (1.1-20211229) unstable; urgency=medium
 
   * New upstream release
