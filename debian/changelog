@@ -1,3 +1,12 @@
+dhcpy6d (1.7.0-1.1) UNRELEASED; urgency=medium
+
+  * Non-maintainer upload.
+  * Add opt-in dynamic-prefix support for dhcpcd. Restore fixed DHCPv6
+    addresses omitted from RENEW replies. Fix validation of the default
+    cleaning interval.
+
+ -- Felix Jacobi <felix.jacobi@iserv.eu>  Tue, 25 Aug 2026 19:11:54 +0200
+
 dhcpy6d (1.7.0-1) unstable; urgency=medium
 
   * New upstream release
