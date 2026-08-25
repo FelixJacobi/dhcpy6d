@@ -83,6 +83,7 @@ def reuse_lease(client=None, client_config=None, transaction=None):
                                 elif a['category'] == 'fixed' and client_config.ADDRESS is not None:
                                     if address not in client_config.ADDRESS:
                                         use_lease = False
+                                        stale_configuration = True
                                 elif a['category'] == 'dns':
                                     use_lease = False
 
