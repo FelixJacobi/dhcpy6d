@@ -1,61 +1,19 @@
-dhcpy6d (1.7.0-1.8) UNRELEASED; urgency=medium
+dhcpy6d (1.7.0-1+stsblnmu1) unstable; urgency=medium
 
   * Non-maintainer upload.
-  * Handle empty optional DNS and NTP options when dynamic prefix
-    expansion is enabled.
+  * Add opt-in dynamic-prefix support for dhcpcd, including dynamic $prefix$
+    expansion in server, DNS, NTP, boot-file, and client configuration options.
+  * Restore fixed addresses omitted from RENEW replies and refuse removed fixed
+    addresses or delegated prefixes with RFC-compliant zero lifetimes
+    (closes: #68; references: #48).
+  * Avoid duplicate class-generated IA_NA addresses for clients with fixed
+    addresses.
+  * Batch volatile SQLite writes and run complete lease storage in the
+    background database worker, avoiding reply delays caused by storage I/O.
+  * Correct cleaning-interval validation, avoid a startup crash for empty
+    optional address options, and remove the accidental /etc/bird sandbox path.
 
- -- Felix Jacobi <felix.jacobi@iserv.eu>  Wed, 26 Aug 2026 14:38:15 +0200
-
-dhcpy6d (1.7.0-1.7) UNRELEASED; urgency=medium
-
-  * Non-maintainer upload.
-  * Remove the accidental /etc/bird dhcpcd sandbox path, which prevented
-    service startup when bird is not installed.
-
- -- Felix Jacobi <felix.jacobi@iserv.eu>  Wed, 26 Aug 2026 13:25:29 +0200
-
-dhcpy6d (1.7.0-1.6) UNRELEASED; urgency=medium
-
-  * Non-maintainer upload.
-  * Use the shared cleaning-interval validation fix rather than changing the
-    configuration default type.
-
- -- Felix Jacobi <felix.jacobi@iserv.eu>  Wed, 26 Aug 2026 08:15:00 +0200
-
-dhcpy6d (1.7.0-1.5) UNRELEASED; urgency=medium
-
-  * Non-maintainer upload.
-  * Expand dynamic $prefix$ placeholders in server, DNS, and NTP options
-    before IPv6 validation and DHCP option encoding.
-
- -- Felix Jacobi <felix.jacobi@iserv.eu>  Wed, 26 Aug 2026 08:00:00 +0200
-
-dhcpy6d (1.7.0-1.4) UNRELEASED; urgency=medium
-
-  * Non-maintainer upload.
-  * Run complete volatile lease storage in the background database worker,
-    preventing slow SQLite I/O from delaying DHCPv6 responses.
-
- -- Felix Jacobi <felix.jacobi@iserv.eu>  Tue, 25 Aug 2026 21:50:26 +0200
-
-dhcpy6d (1.7.0-1.3) UNRELEASED; urgency=medium
-
-  * Non-maintainer upload.
-  * Batch volatile SQLite lease writes so fsync delays cannot send DHCPv6
-    responses after the client has advanced to a later transaction.
-
- -- Felix Jacobi <felix.jacobi@iserv.eu>  Tue, 25 Aug 2026 21:20:09 +0200
-
-dhcpy6d (1.7.0-1.2) UNRELEASED; urgency=medium
-
-  * Non-maintainer upload.
-  * Add opt-in dynamic-prefix support for dhcpcd. Restore fixed DHCPv6
-    addresses omitted from RENEW replies. Fix validation of the default
-    cleaning interval.
-  * Avoid duplicate class-generated IA_NA addresses for clients with
-    fixed addresses (closes: #68; references: #48).
-
- -- Felix Jacobi <felix.jacobi@iserv.eu>  Tue, 25 Aug 2026 19:48:09 +0200
+ -- Felix Jacobi <felix.jacobi@iserv.eu>  Wed, 26 Aug 2026 15:20:00 +0200
 
 dhcpy6d (1.7.0-1) unstable; urgency=medium
 
