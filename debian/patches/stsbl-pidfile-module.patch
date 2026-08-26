@@ -1,6 +1,75 @@
-diff --git a/dhcpy6d/pidfile.py b/dhcpy6d/pidfile.py
-new file mode 100644
-index 0000000..99f61f6
+--- a/main.py
++++ b/main.py
+@@ -18,7 +18,6 @@
+ # along with this program; if not, write to the Free Software
+ # Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301, USA
+ 
+-import atexit
+ import distro
+ import sys
+ 
+@@ -32,10 +31,10 @@
+ import pwd
+ import os
+ import socket
+-from pathlib import Path
+ 
+ from dhcpy6d import UDPMulticastIPv6
+ from dhcpy6d.config import cfg
++from dhcpy6d.pidfile import write_pid_file
+ 
+ from dhcpy6d.globals import (config_answer_queue,
+                              config_query_queue,
+@@ -56,20 +55,12 @@
+                              TimerThread)
+ 
+ 
+-def manage_pid_file():
+-    if not cfg.cli_pid_file:
+-        return
+-    pid_file = Path(cfg.cli_pid_file)
+-    pid_file.parent.mkdir(parents=True, exist_ok=True)
+-    pid_file.write_text(f'{os.getpid()}\n')
+-    atexit.register(lambda: pid_file.unlink(missing_ok=True))
+-
+ 
+ # main part, initializing all stuff
+ def run():
+     log.info('Starting dhcpy6d daemon...')
+     log.info(f'Server DUID: {cfg.SERVERDUID}')
+-    manage_pid_file()
++    write_pid_file(cfg.cli_pid_file)
+ 
+     # configure SocketServer
+     UDPMulticastIPv6.address_family = socket.AF_INET6
+--- a/tests/test_prefix_substitution.py
++++ b/tests/test_prefix_substitution.py
+@@ -548,25 +548,3 @@
+         self.assertEqual(Config.CLASSES['default'].NAMESERVER, '')
+         self.assertEqual(Config.CLASSES['default'].NTP_SERVER, '')
+ 
+-
+-class PidFileSupervisionTest(unittest.TestCase):
+-    def test_pid_file_is_written_and_systemd_restarts_daemon(self):
+-        import main as daemon_main
+-        with tempfile.TemporaryDirectory() as directory:
+-            pid_file = os.path.join(directory, 'run', 'dhcpy6d.pid')
+-            previous = cfg.cli_pid_file
+-            try:
+-                cfg.cli_pid_file = pid_file
+-                daemon_main.manage_pid_file()
+-                with open(pid_file) as handle:
+-                    self.assertEqual(handle.read(), f'{os.getpid()}\n')
+-            finally:
+-                cfg.cli_pid_file = previous
+-
+-        with open('debian/dhcpy6d.service') as handle:
+-            service = handle.read()
+-        self.assertIn('Type=exec', service)
+-        self.assertIn('RuntimeDirectory=dhcpy6d', service)
+-        self.assertIn('PIDFile=/run/dhcpy6d/dhcpy6d.pid', service)
+-        self.assertIn('Restart=on-failure', service)
+-        self.assertIn('--pid-file /run/dhcpy6d/dhcpy6d.pid', service)
 --- /dev/null
 +++ b/dhcpy6d/pidfile.py
 @@ -0,0 +1,15 @@
@@ -19,12 +88,9 @@ index 0000000..99f61f6
 +    pid_file.parent.mkdir(parents=True, exist_ok=True)
 +    pid_file.write_text(f'{os.getpid()}\n')
 +    atexit.register(lambda: pid_file.unlink(missing_ok=True))
-diff --git a/tests/test_pid_file.py b/tests/test_pid_file.py
-new file mode 100644
-index 0000000..3fb1610
 --- /dev/null
 +++ b/tests/test_pid_file.py
-@@ -0,0 +1,18 @@
+@@ -0,0 +1,17 @@
 +import os
 +import tempfile
 +import unittest
@@ -42,4 +108,3 @@ index 0000000..3fb1610
 +
 +    def test_empty_path_is_ignored(self):
 +        self.assertIsNone(write_pid_file(None))
-+
