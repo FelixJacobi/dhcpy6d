@@ -60,6 +60,16 @@ def inject_dynamic_prefix_options(config, dynamic_prefix):
     config.NAMESERVER = expand(config.NAMESERVER)
     config.NTP_SERVER = expand(config.NTP_SERVER)
     config.SNTP_SERVERS = expand(config.SNTP_SERVERS)
+    config.DNS_UPDATE_NAMESERVER = inject_dynamic_prefix(
+        config.DNS_UPDATE_NAMESERVER, dynamic_prefix, allow_legacy_concat=True)[0]
+    for bootfile in config.BOOTFILES.values():
+        # URLs contain the IPv6 literal in brackets; expand that literal rather
+        # than validating the complete URL as an IPv6 address.
+        bootfile.BOOTFILE_URL = re.sub(
+            r'\[([^]]+)\]',
+            lambda match: '[' + inject_dynamic_prefix(
+                match.group(1), dynamic_prefix, allow_legacy_concat=True)[0] + ']',
+            bootfile.BOOTFILE_URL)
     for client_class in config.CLASSES.values():
         client_class.NAMESERVER = expand(client_class.NAMESERVER)
         client_class.NTP_SERVER = expand(client_class.NTP_SERVER)
