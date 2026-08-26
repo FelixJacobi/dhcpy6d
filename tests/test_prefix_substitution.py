@@ -498,6 +498,7 @@ class PrefixOptionSubstitutionTest(unittest.TestCase):
         self.assertEqual(Config.CLASSES['default'].NAMESERVER, '2001:db8:100:2019::54')
         self.assertEqual(Config.CLASSES['default'].NTP_SERVER,
                          '2001:db8:100:2019::125 ntp.example.test')
+
 class PrefixOptionSubstitutionTest(unittest.TestCase):
     def test_expands_global_and_class_literal_ipv6_options(self):
         from dhcpy6d.config import BootFile, Class, inject_dynamic_prefix_options
@@ -525,3 +526,24 @@ class PrefixOptionSubstitutionTest(unittest.TestCase):
         self.assertEqual(Config.CLASSES['default'].NAMESERVER, '2001:db8:100:2019::54')
         self.assertEqual(Config.CLASSES['default'].NTP_SERVER,
                          '2001:db8:100:2019::125 ntp.example.test')
+
+    def test_accepts_unconfigured_optional_address_options(self):
+        from dhcpy6d.config import BootFile, Class, inject_dynamic_prefix_options
+
+        class Config:
+            ADDRESS = '$prefix$19::1'
+            NAMESERVER = ''
+            NTP_SERVER = ''
+            SNTP_SERVERS = ''
+            DNS_UPDATE_NAMESERVER = '::1'
+            CLASSES = {'default': Class('default')}
+            BOOTFILES = {'pxe': BootFile('pxe')}
+
+        inject_dynamic_prefix_options(Config, '2001:db8:100:20')
+
+        self.assertEqual(Config.ADDRESS, '2001:db8:100:2019::1')
+        self.assertEqual(Config.NAMESERVER, '')
+        self.assertEqual(Config.NTP_SERVER, '')
+        self.assertEqual(Config.SNTP_SERVERS, '')
+        self.assertEqual(Config.CLASSES['default'].NAMESERVER, '')
+        self.assertEqual(Config.CLASSES['default'].NTP_SERVER, '')
