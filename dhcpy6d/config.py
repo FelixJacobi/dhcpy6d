@@ -220,7 +220,7 @@ class Config:
         self.REALLY_DO_IT = 'False'
 
         # interval for TidyUp thread - time to sleep in TidyUpThread
-        self.CLEANING_INTERVAL = "10"
+        self.CLEANING_INTERVAL = 10
 
         # address, bootfile and class schemes
         self.ADDRESSES = {}
