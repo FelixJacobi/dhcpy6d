@@ -1,3 +1,10 @@
+dhcpy6d (1.7.0-1+stsblnmu2) UNRELEASED; urgency=medium
+
+  * Add a systemd-managed runtime PID file and restart dhcpy6d after
+    failures.
+
+ -- Felix Jacobi <felix.jacobi@iserv.eu>  Thu, 27 Aug 2026 01:03:39 +0200
+
 dhcpy6d (1.7.0-1+stsblnmu1) unstable; urgency=medium
 
   * Non-maintainer upload.

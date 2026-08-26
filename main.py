@@ -18,6 +18,7 @@
 # along with this program; if not, write to the Free Software
 # Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301, USA
 
+import atexit
 import distro
 import sys
 
@@ -31,6 +32,7 @@ import grp
 import pwd
 import os
 import socket
+from pathlib import Path
 
 from dhcpy6d import UDPMulticastIPv6
 from dhcpy6d.config import cfg
@@ -54,10 +56,20 @@ from dhcpy6d.threads import (DNSQueryThread,
                              TimerThread)
 
 
+def manage_pid_file():
+    if not cfg.cli_pid_file:
+        return
+    pid_file = Path(cfg.cli_pid_file)
+    pid_file.parent.mkdir(parents=True, exist_ok=True)
+    pid_file.write_text(f'{os.getpid()}\n')
+    atexit.register(lambda: pid_file.unlink(missing_ok=True))
+
+
 # main part, initializing all stuff
 def run():
     log.info('Starting dhcpy6d daemon...')
     log.info(f'Server DUID: {cfg.SERVERDUID}')
+    manage_pid_file()
 
     # configure SocketServer
     UDPMulticastIPv6.address_family = socket.AF_INET6

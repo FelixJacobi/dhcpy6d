@@ -547,3 +547,26 @@ class PrefixOptionSubstitutionTest(unittest.TestCase):
         self.assertEqual(Config.SNTP_SERVERS, '')
         self.assertEqual(Config.CLASSES['default'].NAMESERVER, '')
         self.assertEqual(Config.CLASSES['default'].NTP_SERVER, '')
+
+
+class PidFileSupervisionTest(unittest.TestCase):
+    def test_pid_file_is_written_and_systemd_restarts_daemon(self):
+        import main as daemon_main
+        with tempfile.TemporaryDirectory() as directory:
+            pid_file = os.path.join(directory, 'run', 'dhcpy6d.pid')
+            previous = cfg.cli_pid_file
+            try:
+                cfg.cli_pid_file = pid_file
+                daemon_main.manage_pid_file()
+                with open(pid_file) as handle:
+                    self.assertEqual(handle.read(), f'{os.getpid()}\n')
+            finally:
+                cfg.cli_pid_file = previous
+
+        with open('debian/dhcpy6d.service') as handle:
+            service = handle.read()
+        self.assertIn('Type=exec', service)
+        self.assertIn('RuntimeDirectory=dhcpy6d', service)
+        self.assertIn('PIDFile=/run/dhcpy6d/dhcpy6d.pid', service)
+        self.assertIn('Restart=on-failure', service)
+        self.assertIn('--pid-file /run/dhcpy6d/dhcpy6d.pid', service)
