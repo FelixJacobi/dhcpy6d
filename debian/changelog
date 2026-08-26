@@ -1,3 +1,10 @@
+dhcpy6d (1.7.0-1.5+stsblnmu2~pre+1) unstable; urgency=medium
+
+  * Use a base revision compatible with the server integration
+    dependency.
+
+ -- Felix Jacobi <felix.jacobi@iserv.eu>  Thu, 27 Aug 2026 01:18:14 +0200
+
 dhcpy6d (1.7.0-1+stsblnmu2~pre+1) unstable; urgency=medium
 
   * Add a systemd-managed runtime PID file and restart dhcpy6d after
