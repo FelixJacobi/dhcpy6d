@@ -1,3 +1,11 @@
+dhcpy6d (1.7.0-1.7) UNRELEASED; urgency=medium
+
+  * Non-maintainer upload.
+  * Remove the accidental /etc/bird dhcpcd sandbox path, which prevented
+    service startup when bird is not installed.
+
+ -- Felix Jacobi <felix.jacobi@iserv.eu>  Wed, 26 Aug 2026 13:25:29 +0200
+
 dhcpy6d (1.7.0-1.6) UNRELEASED; urgency=medium
 
   * Non-maintainer upload.
