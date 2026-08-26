@@ -34,9 +34,36 @@ import uuid
 from .helpers import (decompress_ip6,
                       error_exit,
                       get_interfaces,
+                      inject_dynamic_prefix,
                       listify_option,
                       LOCALHOST_INTERFACES,
                       send_control_message)
+
+def inject_dynamic_prefix_options(config, dynamic_prefix):
+    """Expand $prefix$ in scalar DHCPv6 option values before validation.
+
+    Patterns already carry their own prototype handling.  These options are
+    literal IPv6 addresses and therefore need the same compatibility-aware
+    expansion before they are listified and encoded.
+    """
+    if not dynamic_prefix:
+        return
+
+    def expand(value):
+        values = listify_option(value)
+        return ' '.join(inject_dynamic_prefix(item, dynamic_prefix,
+                                               allow_legacy_concat=True)[0]
+                        for item in values)
+
+    config.ADDRESS = inject_dynamic_prefix(config.ADDRESS, dynamic_prefix,
+                                           allow_legacy_concat=True)[0]
+    config.NAMESERVER = expand(config.NAMESERVER)
+    config.NTP_SERVER = expand(config.NTP_SERVER)
+    config.SNTP_SERVERS = expand(config.SNTP_SERVERS)
+    for client_class in config.CLASSES.values():
+        client_class.NAMESERVER = expand(client_class.NAMESERVER)
+        client_class.NTP_SERVER = expand(client_class.NTP_SERVER)
+
 
 # needed for boolean options
 BOOLPOOL = {'0': False, '1': True, 'no': False, 'yes': True, 'false': False, 'true': True, False: False, True: True,
@@ -193,7 +220,7 @@ class Config:
         self.REALLY_DO_IT = 'False'
 
         # interval for TidyUp thread - time to sleep in TidyUpThread
-        self.CLEANING_INTERVAL = 10
+        self.CLEANING_INTERVAL = "10"
 
         # address, bootfile and class schemes
         self.ADDRESSES = {}
@@ -468,6 +495,9 @@ class Config:
                         else:
                             self.CLASSES[section.lower().split('class_', 1)[1]].__setattr__(item[0].upper(),
                                                                                          str(item[1]).strip())
+
+        # Expand literal server and option addresses before listification and validation.
+        inject_dynamic_prefix_options(self, self.PREFIX)
 
         # The next paragraphs contain finetuning
         self.IDENTIFICATION = listify_option(self.IDENTIFICATION)
