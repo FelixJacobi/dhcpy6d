@@ -4,6 +4,7 @@ import os
 import sys
 import tempfile
 import unittest
+from types import SimpleNamespace
 
 
 # dhcpy6d parses CLI args at import time, so provide a minimal portable config first.
@@ -70,6 +71,7 @@ from dhcpy6d.threads import RouteThread
 from dhcpy6d.globals import route_queue, timer
 from dhcpy6d import route as route_module
 reuse_lease_module = importlib.import_module('dhcpy6d.client.reuse_lease')
+from_config_module = importlib.import_module('dhcpy6d.client.from_config')
 
 os.chown = _ORIGINAL_CHOWN
 sys.argv = _ORIGINAL_ARGV
@@ -162,6 +164,42 @@ class PrefixSubstitutionTest(unittest.TestCase):
         self.assertEqual(client.addresses[0].ADDRESS, '20010db8000000000000000000000001')
         self.assertEqual(client.prefixes[0].PREFIX, '20010db8000000000000000000000000')
         self.assertEqual(client.prefixes[0].LENGTH, '64')
+
+    def test_from_config_does_not_duplicate_fixed_address_from_class(self):
+        fixed_address = '20010db808388f000000c0fffea80002'
+        random_address = '20010db808388f000123456789abcdef'
+        original_addresses = cfg.ADDRESSES
+        original_parse_pattern_address = from_config_module.parse_pattern_address
+        cfg.CLASSES['default'].ADDRESSES = ['class_eui64', 'class_random']
+        cfg.ADDRESSES = {
+            'class_eui64': SimpleNamespace(
+                CATEGORY='eui64', IA_TYPE='na', PREFERRED_LIFETIME=5400,
+                VALID_LIFETIME=7200, CLASS='default', TYPE='class_eui64',
+                DNS_UPDATE=False, DNS_ZONE='', DNS_REV_ZONE='', DNS_TTL=0,
+            ),
+            'class_random': SimpleNamespace(
+                CATEGORY='random', IA_TYPE='ta', PREFERRED_LIFETIME=5400,
+                VALID_LIFETIME=7200, CLASS='default', TYPE='class_random',
+                DNS_UPDATE=False, DNS_ZONE='', DNS_REV_ZONE='', DNS_TTL=0,
+            ),
+        }
+        from_config_module.parse_pattern_address = lambda address, *_args: (
+            fixed_address if address.TYPE == 'class_eui64' else random_address
+        )
+        try:
+            client = Client()
+            transaction = MockTransaction()
+            client_config = ClientConfig(
+                hostname='paperless', client_class='default', address=fixed_address,
+            )
+            from_config(client=client, client_config=client_config, transaction=transaction)
+            self.assertEqual(
+                [(address.ADDRESS, address.IA_TYPE) for address in client.addresses],
+                [(fixed_address, 'na'), (random_address, 'ta')],
+            )
+        finally:
+            cfg.ADDRESSES = original_addresses
+            from_config_module.parse_pattern_address = original_parse_pattern_address
 
     def test_prefix_substitution_keeps_legacy_concat_when_it_fits(self):
         cfg.PREFIX = '2001:db8:10:20'
@@ -361,10 +399,105 @@ class PrefixSubstitutionTest(unittest.TestCase):
         finally:
             reuse_lease_module.volatile_store = original_store
 
+    def test_reuse_lease_deactivates_fixed_address_removed_from_client_configuration(self):
+        class _MockLeaseStore:
+            def __init__(self):
+                self.deactivated = []
+
+            @staticmethod
+            def check_lease(_address, _transaction):
+                return [('iserv', '20010db808388fa30000000000000002', 'fixed', 'fixed', 'na', 'default', 0)]
+
+            def deactivate_lease(self, address):
+                self.deactivated.append(address)
+
+        mock_store = _MockLeaseStore()
+        original_store = reuse_lease_module.volatile_store
+        reuse_lease_module.volatile_store = mock_store
+        cfg.CLASSES['default'].ADVERTISE = ['addresses']
+        cfg.CLASSES['default'].ADDRESSES = []
+        cfg.CLASSES['default_eth0'] = cfg.CLASSES['default']
+        client_config = ClientConfig(
+            hostname='iserv',
+            client_class='default',
+            address='2001:db8:838:8fa3::3',
+        )
+        try:
+            client = Client()
+            transaction = MockAddressTransaction()
+            reuse_lease_module.reuse_lease(client=client, client_config=client_config, transaction=transaction)
+            addresses = {address.ADDRESS.replace(':', ''): address for address in client.addresses}
+            self.assertEqual(set(addresses), {
+                '20010db808388fa30000000000000002',
+                '20010db808388fa30000000000000003',
+            })
+            self.assertEqual(addresses['20010db808388fa30000000000000002'].PREFERRED_LIFETIME, 0)
+            self.assertEqual(addresses['20010db808388fa30000000000000002'].VALID_LIFETIME, 0)
+            self.assertEqual(mock_store.deactivated, ['20010db808388fa30000000000000002'])
+        finally:
+            reuse_lease_module.volatile_store = original_store
+
+    def test_reuse_lease_restores_fixed_address_missing_from_renew(self):
+        class _MockLeaseStore:
+            @staticmethod
+            def check_lease(_address, _transaction):
+                return [('iserv', '20010db808388fa30000000000000002', 'fixed', 'fixed', 'na', 'default', 0)]
+
+            @staticmethod
+            def deactivate_lease(_address):
+                raise AssertionError('configured fixed lease must remain active')
+
+        original_store = reuse_lease_module.volatile_store
+        reuse_lease_module.volatile_store = _MockLeaseStore()
+        cfg.CLASSES['default'].ADVERTISE = ['addresses']
+        cfg.CLASSES['default'].ADDRESSES = []
+        cfg.CLASSES['default_eth0'] = cfg.CLASSES['default']
+        client_config = ClientConfig(
+            hostname='iserv',
+            client_class='default',
+            address=['2001:db8:838:8fa3::2', '2001:db8:838:8fa3::3'],
+        )
+        try:
+            client = Client()
+            transaction = MockAddressTransaction()
+            transaction.addresses = ['20010db808388fa30000000000000002']
+            reuse_lease_module.reuse_lease(client=client, client_config=client_config, transaction=transaction)
+            self.assertEqual(
+                {address.ADDRESS.replace(':', '') for address in client.addresses},
+                {
+                    '20010db808388fa30000000000000002',
+                    '20010db808388fa30000000000000003',
+                },
+            )
+        finally:
+            reuse_lease_module.volatile_store = original_store
+
 
 if __name__ == "__main__":
     unittest.main()
 
+class PrefixOptionSubstitutionTest(unittest.TestCase):
+    def test_expands_global_and_class_literal_ipv6_options(self):
+        from dhcpy6d.config import Class, inject_dynamic_prefix_options
+
+        class Config:
+            ADDRESS = '$prefix$19::1'
+            NAMESERVER = '$prefix$19::53 fd00::53'
+            NTP_SERVER = '$prefix$19::123 time.example.test'
+            SNTP_SERVERS = '$prefix$19::124'
+            CLASSES = {'default': Class('default')}
+
+        Config.CLASSES['default'].NAMESERVER = '$prefix$19::54'
+        Config.CLASSES['default'].NTP_SERVER = '$prefix$19::125 ntp.example.test'
+        inject_dynamic_prefix_options(Config, '2001:db8:100:20')
+
+        self.assertEqual(Config.ADDRESS, '2001:db8:100:2019::1')
+        self.assertEqual(Config.NAMESERVER, '2001:db8:100:2019::53 fd00::53')
+        self.assertEqual(Config.NTP_SERVER, '2001:db8:100:2019::123 time.example.test')
+        self.assertEqual(Config.SNTP_SERVERS, '2001:db8:100:2019::124')
+        self.assertEqual(Config.CLASSES['default'].NAMESERVER, '2001:db8:100:2019::54')
+        self.assertEqual(Config.CLASSES['default'].NTP_SERVER,
+                         '2001:db8:100:2019::125 ntp.example.test')
 class PrefixOptionSubstitutionTest(unittest.TestCase):
     def test_expands_global_and_class_literal_ipv6_options(self):
         from dhcpy6d.config import BootFile, Class, inject_dynamic_prefix_options
