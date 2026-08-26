@@ -1,3 +1,11 @@
+dhcpy6d (1.7.0-1.5) UNRELEASED; urgency=medium
+
+  * Non-maintainer upload.
+  * Expand dynamic $prefix$ placeholders in server, DNS, and NTP options
+    before IPv6 validation and DHCP option encoding.
+
+ -- Felix Jacobi <felix.jacobi@iserv.eu>  Wed, 26 Aug 2026 08:00:00 +0200
+
 dhcpy6d (1.7.0-1.4) UNRELEASED; urgency=medium
 
   * Non-maintainer upload.
