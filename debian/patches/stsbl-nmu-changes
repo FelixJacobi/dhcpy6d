@@ -1,0 +1,2631 @@
+Description: IServ NMU feature and reliability fixes
+Origin: other, IServ NMU integration
+Forwarded: not-needed
+Author: Felix Jacobi <felix.jacobi@iserv.eu>
+Last-Update: 2026-08-26
+
+--- dhcpy6d-1.7.0.orig/.github/workflows/build-release-latest.yml
++++ dhcpy6d-1.7.0/.github/workflows/build-release-latest.yml
+@@ -15,19 +15,19 @@ jobs:
+       dist: debian
+     steps:
+       # get source
+-      - uses: actions/checkout@v4
++      - uses: actions/checkout@v6
+       # build container image for package creation
+-      - run: /usr/bin/docker build -t build-${{ github.job }} -f build/Dockerfile-${{ env.dist }} .
++      - run: /usr/bin/docker build -t build-${{ github.job }} -f build-docker/Dockerfile-${{ env.dist }} .
+       # make entrypoints executable
+-      - run: chmod +x build/*.sh
++      - run: chmod +x build-docker/*.sh
+       # execute container with matching entrypoint
+       - run: |
+           /usr/bin/docker run --volume ${{ github.workspace }}:/dhcpy6d \
+-                              --volume ${{ github.workspace }}/build/entrypoint-${{ github.job }}.sh:/entrypoint.sh \
++                              --volume ${{ github.workspace }}/build-docker/entrypoint-${{ github.job }}.sh:/entrypoint.sh \
+                               --entrypoint /entrypoint.sh \
+                               build-${{ github.job }}
+       # upload results
+-      - uses: actions/upload-artifact@v4
++      - uses: actions/upload-artifact@v7
+         with:
+           path: ./*.deb
+           retention-days: 1
+@@ -40,19 +40,19 @@ jobs:
+       dist: centos
+     steps:
+       # get source
+-      - uses: actions/checkout@v4
++      - uses: actions/checkout@v6
+       # build container image for package creation
+-      - run: /usr/bin/docker build -t build-${{ github.job }} -f build/Dockerfile-${{ env.dist }} .
++      - run: /usr/bin/docker build -t build-${{ github.job }} -f build-docker/Dockerfile-${{ env.dist }} .
+       # make entrypoints executable
+-      - run: chmod +x build/*.sh
++      - run: chmod +x build-docker/*.sh
+       # execute container with matching entrypoint
+       - run: |
+           /usr/bin/docker run --volume ${{ github.workspace }}:/dhcpy6d \
+-                              --volume ${{ github.workspace }}/build/entrypoint-${{ github.job }}.sh:/entrypoint.sh \
++                              --volume ${{ github.workspace }}/build-docker/entrypoint-${{ github.job }}.sh:/entrypoint.sh \
+                               --entrypoint /entrypoint.sh \
+                               build-${{ github.job }}
+       # upload results
+-      - uses: actions/upload-artifact@v4
++      - uses: actions/upload-artifact@v7
+         with:
+           path: ./*.rpm
+           retention-days: 1
+--- dhcpy6d-1.7.0.orig/.github/workflows/build-release-stable.yml
++++ dhcpy6d-1.7.0/.github/workflows/build-release-stable.yml
+@@ -16,17 +16,17 @@ jobs:
+       # get source
+       - uses: actions/checkout@v2
+       # build container image for package creation
+-      - run: /usr/bin/docker build -t build-${{ github.job }} -f build/Dockerfile-${{ env.dist }} .
++      - run: /usr/bin/docker build -t build-${{ github.job }} -f build-docker/Dockerfile-${{ env.dist }} .
+       # make entrypoints executable
+-      - run: chmod +x build/*.sh
++      - run: chmod +x build-docker/*.sh
+       # execute container with matching entrypoint
+       - run: |
+           /usr/bin/docker run --volume ${{ github.workspace }}:/dhcpy6d \
+-                              --volume ${{ github.workspace }}/build/entrypoint-${{ github.job }}.sh:/entrypoint.sh \
++                              --volume ${{ github.workspace }}/build-docker/entrypoint-${{ github.job }}.sh:/entrypoint.sh \
+                               --entrypoint /entrypoint.sh \
+                               build-${{ github.job }}
+       # upload results
+-      - uses: actions/upload-artifact@v2
++      - uses: actions/upload-artifact@v7
+         with:
+           path: ./*.deb
+           retention-days: 1
+@@ -39,17 +39,17 @@ jobs:
+       # get source
+       - uses: actions/checkout@v2
+       # build container image for package creation
+-      - run: /usr/bin/docker build -t build-${{ github.job }} -f build/Dockerfile-${{ env.dist }} .
++      - run: /usr/bin/docker build -t build-${{ github.job }} -f build-docker/Dockerfile-${{ env.dist }} .
+       # make entrypoints executable
+-      - run: chmod +x build/*.sh
++      - run: chmod +x build-docker/*.sh
+       # execute container with matching entrypoint
+       - run: |
+           /usr/bin/docker run --volume ${{ github.workspace }}:/dhcpy6d \
+-                              --volume ${{ github.workspace }}/build/entrypoint-${{ github.job }}.sh:/entrypoint.sh \
++                              --volume ${{ github.workspace }}/build-docker/entrypoint-${{ github.job }}.sh:/entrypoint.sh \
+                               --entrypoint /entrypoint.sh \
+                               build-${{ github.job }}
+       # upload results
+-      - uses: actions/upload-artifact@v2
++      - uses: actions/upload-artifact@v7
+         with:
+           path: ./*.rpm
+           retention-days: 1
+@@ -64,9 +64,9 @@ jobs:
+       # get binaries created by other jobs
+       - uses: actions/download-artifact@v2
+       # build container image for repo packaging, using the same as for building
+-      - run: /usr/bin/docker build -t ${{ github.job }} -f build/Dockerfile-${{ env.dist }} .
++      - run: /usr/bin/docker build -t ${{ github.job }} -f build-docker/Dockerfile-${{ env.dist }} .
+       # make entrypoints executable
+-      - run: chmod +x build/entrypoint-*.sh
++      - run: chmod +x build-docker/entrypoint-*.sh
+       # get secret signing key
+       - run: echo "${{ secrets.DHCPY6D_SIGNING_KEY }}" >  signing_key.asc
+       # organize SSH deploy key for dhcp6d-jekyll repo
+@@ -80,7 +80,7 @@ jobs:
+       # execute container with matching entrypoint
+       - run: |
+           /usr/bin/docker run --volume ${{ github.workspace }}:/dhcpy6d \
+-                              --volume ${{ github.workspace }}/build/entrypoint-${{ github.job }}.sh:/entrypoint.sh \
++                              --volume ${{ github.workspace }}/build-docker/entrypoint-${{ github.job }}.sh:/entrypoint.sh \
+                               --entrypoint /entrypoint.sh \
+                               --env RELEASE=${{ env.release }} \
+                               ${{ github.job }}
+@@ -99,9 +99,9 @@ jobs:
+       # get binaries created by other jobs
+       - uses: actions/download-artifact@v2
+       # build container image for repo packaging, using the same as for building
+-      - run: /usr/bin/docker build -t ${{ github.job }} -f build/Dockerfile-${{ env.dist }} .
++      - run: /usr/bin/docker build -t ${{ github.job }} -f build-docker/Dockerfile-${{ env.dist }} .
+       # make entrypoints executable
+-      - run: chmod +x build/entrypoint-*.sh
++      - run: chmod +x build-docker/entrypoint-*.sh
+       # get secret signing key
+       - run: echo "${{ secrets.DHCPY6D_SIGNING_KEY }}" >  signing_key.asc
+       # organize SSH deploy key for dhcp6d-jekyll repo
+@@ -115,7 +115,7 @@ jobs:
+       # execute container with matching entrypoint
+       - run: |
+           /usr/bin/docker run --volume ${{ github.workspace }}:/dhcpy6d \
+-                              --volume ${{ github.workspace }}/build/entrypoint-${{ github.job }}.sh:/entrypoint.sh \
++                              --volume ${{ github.workspace }}/build-docker/entrypoint-${{ github.job }}.sh:/entrypoint.sh \
+                               --entrypoint /entrypoint.sh \
+                               --env RELEASE=${{ env.release }} \
+                               ${{ github.job }}
+--- /dev/null
++++ dhcpy6d-1.7.0/.github/workflows/test.yml
+@@ -0,0 +1,17 @@
++name: test-suite
++
++on:
++  push:
++    branches: ['**']
++  pull_request:
++
++jobs:
++  unittest-discover:
++    runs-on: ubuntu-latest
++    steps:
++      - uses: actions/checkout@v4
++      - uses: actions/setup-python@v5
++        with:
++          python-version: '3.11'
++      - name: Run all unit tests
++        run: python -m unittest discover -s tests -p "test_*.py" -v
+--- /dev/null
++++ dhcpy6d-1.7.0/build-docker/Dockerfile-centos
+@@ -0,0 +1,17 @@
++FROM rockylinux:9
++LABEL maintainer=henri@dhcpy6d.de
++
++# get build requirements
++RUN yum -y install createrepo \
++                   git \
++                   gpg \
++                   python3-devel \
++                   python3-docutils \
++                   rpm-build \
++                   rpm-sign \
++                   sudo \
++                   systemd \
++                   which
++
++# flexible entrypoint, mounted as volume
++ENTRYPOINT ["/entrypoint.sh"]
+--- /dev/null
++++ dhcpy6d-1.7.0/build-docker/Dockerfile-debian
+@@ -0,0 +1,22 @@
++FROM debian:12
++LABEL maintainer=henri@dhcpy6d.de
++
++# get build requirements
++RUN apt -y update 
++RUN apt -y install apt-utils \
++                   build-essential \
++                   dpkg-dev \
++                   devscripts \
++                   dh-python \
++                   git \
++                   gpg \
++                   python3-all \
++                   python3-distro \
++                   python3-distutils \
++                   python3-docutils \
++                   python3-lib2to3 \
++                   python3-setuptools \
++                   sudo
++
++# flexible entrypoint, mounted as volume
++ENTRYPOINT ["/entrypoint.sh"]
+--- /dev/null
++++ dhcpy6d-1.7.0/build-docker/entrypoint-build-centos.sh
+@@ -0,0 +1,12 @@
++#!/bin/bash
++#
++# flexible entrypoint, mounted as volume
++#
++
++set -e
++
++# got to working directory
++cd /dhcpy6d
++
++# run build script
++./build.sh
+--- /dev/null
++++ dhcpy6d-1.7.0/build-docker/entrypoint-build-debian.sh
+@@ -0,0 +1,13 @@
++#!/bin/bash
++#
++# flexible entrypoint, mounted as volume
++#
++
++set -e
++
++# got to working directory
++cd /dhcpy6d
++# run build script
++./build.sh
++# copy resulting Debian package back into working directory
++cp /*.deb /dhcpy6d
+\ No newline at end of file
+--- /dev/null
++++ dhcpy6d-1.7.0/build-docker/entrypoint-repo-centos.sh
+@@ -0,0 +1,28 @@
++#!/bin/bash
++#
++# create repo package files and sign them
++#
++
++set -e
++
++# go to working directory volume
++cd /dhcpy6d
++
++# import signing key, stored from GitHub secrets in workflow
++gpg --import signing_key.asc
++
++# put package to its later place
++cp -r artifact/*.rpm dhcpy6d-jekyll/docs/repo/${RELEASE}/centos
++
++# RELEASE is a runtime --env argument to make it easier to provide stable and latest reo
++cd dhcpy6d-jekyll/docs/repo/${RELEASE}/centos
++
++# create repo files + sign package
++gpg --output RPM-GPG-KEY-dhcpy6d --armor --export
++cp RPM-GPG-KEY-dhcpy6d /etc/pki/rpm-gpg
++rpm --import RPM-GPG-KEY-dhcpy6d
++echo "%_signature gpg" > ~/.rpmmacros
++echo "%_gpg_name dhcpy6d" >> ~/.rpmmacros
++rpm --resign *.rpm
++createrepo --update .
++rm -rf .rpmmacros
+--- /dev/null
++++ dhcpy6d-1.7.0/build-docker/entrypoint-repo-debian.sh
+@@ -0,0 +1,28 @@
++#!/bin/bash
++#
++# create repo package files and sign them
++#
++
++set -e
++
++# go to working directory volume
++cd /dhcpy6d
++
++# import signing key, stored from GitHub secrets in workflow
++gpg --import signing_key.asc
++
++# put package to its later place
++cp -r artifact/*.deb dhcpy6d-jekyll/docs/repo/${RELEASE}/debian
++
++# RELEASE is a runtime --env argument to make it easier to provide stable and latest reo
++cd dhcpy6d-jekyll/docs/repo/${RELEASE}/debian
++
++# create repo files
++dpkg-scanpackages . > Packages
++gzip -k -f Packages
++apt-ftparchive release . > Release
++
++# sign package
++gpg -abs -o Release.gpg Release
++gpg --clearsign -o InRelease Release
++gpg --output key.gpg --armor --export
+--- dhcpy6d-1.7.0.orig/dhcpy6d/__init__.py
++++ dhcpy6d-1.7.0/dhcpy6d/__init__.py
+@@ -18,24 +18,43 @@
+ 
+ """Module dhcpy6d"""
+ 
++import importlib
+ import socket
+ import socketserver
+ import struct
++import sys
+ 
+-from .config import cfg
+-from .globals import (collected_macs,
+-                      IF_NAME,
+-                      IF_NUMBER,
+-                      NC,
+-                      OS,
+-                      timer)
+-from .helpers import (colonify_ip6,
+-                      colonify_mac,
+-                      correct_mac,
+-                      decompress_ip6,
+-                      NeighborCacheRecord)
+-from .log import log
+-from .storage import volatile_store
++_LAZY_EXPORTS = {
++    'cfg': ('.config', 'cfg'),
++    'collected_macs': ('.globals', 'collected_macs'),
++    'IF_NAME': ('.globals', 'IF_NAME'),
++    'IF_NUMBER': ('.globals', 'IF_NUMBER'),
++    'NC': ('.globals', 'NC'),
++    'OS': ('.globals', 'OS'),
++    'timer': ('.globals', 'timer'),
++    'colonify_ip6': ('.helpers', 'colonify_ip6'),
++    'colonify_mac': ('.helpers', 'colonify_mac'),
++    'correct_mac': ('.helpers', 'correct_mac'),
++    'decompress_ip6': ('.helpers', 'decompress_ip6'),
++    'NeighborCacheRecord': ('.helpers', 'NeighborCacheRecord'),
++    'log': ('.log', 'log'),
++    'volatile_store': ('.storage', 'volatile_store'),
++}
++
++
++def load_tests(loader, tests, pattern):
++    return tests
++
++
++def __getattr__(name):
++    if name not in _LAZY_EXPORTS:
++        raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
++
++    module_name, attribute_name = _LAZY_EXPORTS[name]
++    module = importlib.import_module(module_name, __name__)
++    attribute = getattr(module, attribute_name)
++    setattr(sys.modules[__name__], name, attribute)
++    return attribute
+ 
+ 
+ class UDPMulticastIPv6(socketserver.UnixDatagramServer):
+@@ -47,6 +66,9 @@ class UDPMulticastIPv6(socketserver.Unix
+         """
+             multicast & python: http://code.activestate.com/recipes/442490/
+         """
++        from .config import cfg
++        from .globals import IF_NAME, IF_NUMBER
++
+         self.socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+         # multicast parameters
+         # hop is one because it is all about the same subnet
+--- dhcpy6d-1.7.0.orig/dhcpy6d/client/from_config.py
++++ dhcpy6d-1.7.0/dhcpy6d/client/from_config.py
+@@ -21,6 +21,10 @@ from ..config import (Address,
+                       Prefix)
+ from ..constants import CONST
+ from ..domain import get_ip_from_dns
++from ..helpers import (decompress_ip6,
++                       convert_prefix_inline,
++                       inject_dynamic_prefix)
++from ..log import log
+ 
+ from .parse_pattern import (parse_pattern_address,
+                             parse_pattern_prefix)
+@@ -39,6 +43,14 @@ def from_config(client=None, client_conf
+                     CONST.OPTION.IA_NA in transaction.ia_options:
+             for address in client_config.ADDRESS:
+                 if len(address) > 0:
++                    # if address contains $prefix$ replace it and decompress it now
++                    if '$prefix$' in address:
++                        address, collision = inject_dynamic_prefix(address, cfg.PREFIX, allow_legacy_concat=True)
++                        if collision:
++                            log.error(f"Client config processing: implicit $prefix$ concatenation in "
++                                      f"ADDRESS '{address}' for host '{client_config.HOSTNAME}'")
++                        address = decompress_ip6(address)
++
+                     # fixed addresses are assumed to be non-temporary
+                     #
+                     # todo: lifetime of address should be set by config too
+@@ -56,6 +68,14 @@ def from_config(client=None, client_conf
+         if client_config.PREFIX is not None and \
+                     CONST.OPTION.IA_PD in transaction.ia_options:
+             for prefix in client_config.PREFIX:
++                # if prefix contains $prefix$ replace it and convert it now
++                if isinstance(prefix, str) and '$prefix$' in prefix:
++                    prefix, collision = inject_dynamic_prefix(prefix, cfg.PREFIX, allow_legacy_concat=True)
++                    if collision:
++                        log.error(f"Client config processing: implicit $prefix$ concatenation in "
++                                  f"PREFIX '{prefix}' for host '{client_config.HOSTNAME}'")
++                    prefix = convert_prefix_inline(prefix)
++
+                 ia_pd = Prefix(prefix=prefix['address'],
+                                length=prefix['length'],
+                                preferred_lifetime=cfg.PREFERRED_LIFETIME,
+@@ -65,6 +85,7 @@ def from_config(client=None, client_conf
+ 
+         if not client_config.CLASS == '':
+             # add all addresses which belong to that class
++            configured_addresses = {decompress_ip6(address.ADDRESS) for address in client.addresses}
+             for address in cfg.CLASSES[client_config.CLASS].ADDRESSES:
+                 # addresses of category 'dns' will be searched in DNS
+                 if cfg.ADDRESSES[address].CATEGORY == 'dns':
+@@ -72,7 +93,7 @@ def from_config(client=None, client_conf
+                 else:
+                     a = parse_pattern_address(cfg.ADDRESSES[address], client_config, transaction)
+                 # in case range has been exceeded a will be None
+-                if a:
++                if a and decompress_ip6(a) not in configured_addresses:
+                     ia = Address(address=a,
+                                  ia_type=cfg.ADDRESSES[address].IA_TYPE,
+                                  preferred_lifetime=cfg.ADDRESSES[address].PREFERRED_LIFETIME,
+@@ -85,6 +106,7 @@ def from_config(client=None, client_conf
+                                  dns_rev_zone=cfg.ADDRESSES[address].DNS_REV_ZONE,
+                                  dns_ttl=cfg.ADDRESSES[address].DNS_TTL)
+                     client.addresses.append(ia)
++                    configured_addresses.add(decompress_ip6(a))
+ 
+             # add all bootfiles which belong to that class
+             for bootfile in cfg.CLASSES[client_config.CLASS].BOOTFILES:
+--- dhcpy6d-1.7.0.orig/dhcpy6d/client/parse_pattern.py
++++ dhcpy6d-1.7.0/dhcpy6d/client/parse_pattern.py
+@@ -62,7 +62,7 @@ def parse_pattern_address(address, clien
+         if advertised_address:
+             a = advertised_address
+         else:
+-            ra = str(hex(random.getrandbits(64)))[2:][:-1]
++            ra = f'{random.getrandbits(64):016x}'
+             ra = ':'.join((ra[0:4], ra[4:8], ra[8:12], ra[12:16]))
+             # subject to change....
+             a = a.replace('$random64$', ra)
+--- dhcpy6d-1.7.0.orig/dhcpy6d/client/reuse_lease.py
++++ dhcpy6d-1.7.0/dhcpy6d/client/reuse_lease.py
+@@ -57,6 +57,7 @@ def reuse_lease(client=None, client_conf
+                         a = dict(list(
+                             zip(('hostname', 'address', 'type', 'category', 'ia_type', 'class', 'preferred_until'),
+                                 item)))
++                        stale_configuration = False
+                         # if lease exists but no configured client set class to default
+                         if client_config is None:
+                             client.hostname = transaction.hostname
+@@ -82,6 +83,7 @@ def reuse_lease(client=None, client_conf
+                                 elif a['category'] == 'fixed' and client_config.ADDRESS is not None:
+                                     if address not in client_config.ADDRESS:
+                                         use_lease = False
++                                        stale_configuration = True
+                                 elif a['category'] == 'dns':
+                                     use_lease = False
+ 
+@@ -157,6 +159,26 @@ def reuse_lease(client=None, client_conf
+                                                      dns_rev_zone=cfg.ADDRESSES[a['type']].DNS_REV_ZONE,
+                                                      dns_ttl=cfg.ADDRESSES[a['type']].DNS_TTL)
+                                         client.addresses.append(ia)
++                            else:
++                                stale_configuration = True
++                        else:
++                            stale_configuration = True
++
++                        if stale_configuration:
++                            volatile_store.deactivate_lease(a['address'])
++
++        if client_config is not None and client_config.ADDRESS is not None and \
++                transaction.interface in cfg.CLASSES[client.client_class].INTERFACE:
++            active_addresses = {decompress_ip6(address.ADDRESS) for address in client.addresses}
++            for address in client_config.ADDRESS:
++                if address not in active_addresses:
++                    client.addresses.append(Address(address=address,
++                                                    ia_type='na',
++                                                    preferred_lifetime=cfg.PREFERRED_LIFETIME,
++                                                    valid_lifetime=cfg.VALID_LIFETIME,
++                                                    category='fixed',
++                                                    aclass='fixed',
++                                                    atype='fixed'))
+ 
+         # important indent here, has to match for...addresses-loop!
+         # look for addresses in transaction that are invalid and add them
+@@ -242,31 +264,22 @@ def reuse_lease(client=None, client_conf
+                                                         pclass=p['class'],
+                                                         route_link_local=cfg.PREFIXES[p['type']].ROUTE_LINK_LOCAL)
+                                             client.prefixes.append(ia)
+-                            # add prefixes which are bound to client to advertised prefixes
+-                            else:
+-                                ia = Prefix(prefix=p['prefix'],
+-                                            length=p['length'],
+-                                            ptype=p['type'],
+-                                            preferred_lifetime=cfg.PREFERRED_LIFETIME,
+-                                            valid_lifetime=cfg.VALID_LIFETIME,
+-                                            category=p['category'],
+-                                            pclass=p['class'],
+-                                            route_link_local=False)
+-                                client.prefixes.append(ia)
++                            # if the original prefix type is no longer configured, do not
++                            # continue to advertise it as valid. It will be refused later
++                            # with preferred/valid lifetime 0 via transaction prefix diff.
+ 
+         # important indent here, has to match for...prefixes-loop!
+         # look for prefixes in transaction that are invalid and add them
+         # to client prefixes with flag invalid and a RFC-compliant lifetime of 0
+-        if len(client.prefixes) > 0:
+-            for p in set(transaction.prefixes).difference(
+-                    [decompress_prefix(x.PREFIX, x.LENGTH) for x in client.prefixes]):
+-                prefix, length = split_prefix(p)
+-                client.prefixes.append(Prefix(prefix=prefix,
+-                                              length=length,
+-                                              valid=False,
+-                                              preferred_lifetime=0,
+-                                              valid_lifetime=0))
+-                del (prefix, length)
++        for p in set(transaction.prefixes).difference(
++                [decompress_prefix(x.PREFIX, x.LENGTH) for x in client.prefixes]):
++            prefix, length = split_prefix(p)
++            client.prefixes.append(Prefix(prefix=prefix,
++                                          length=length,
++                                          valid=False,
++                                          preferred_lifetime=0,
++                                          valid_lifetime=0))
++            del (prefix, length)
+ 
+     # given client has been modified successfully
+     return True
+--- dhcpy6d-1.7.0.orig/dhcpy6d/config.py
++++ dhcpy6d-1.7.0/dhcpy6d/config.py
+@@ -34,10 +34,49 @@ import uuid
+ from .helpers import (decompress_ip6,
+                       error_exit,
+                       get_interfaces,
++                      inject_dynamic_prefix,
+                       listify_option,
+                       LOCALHOST_INTERFACES,
+                       send_control_message)
+ 
++def inject_dynamic_prefix_options(config, dynamic_prefix):
++    """Expand $prefix$ in scalar DHCPv6 option values before validation.
++
++    Patterns already carry their own prototype handling.  These options are
++    literal IPv6 addresses and therefore need the same compatibility-aware
++    expansion before they are listified and encoded.
++    """
++    if not dynamic_prefix:
++        return
++
++    def expand(value):
++        values = listify_option(value)
++        if values is None:
++            return ''
++        return ' '.join(inject_dynamic_prefix(item, dynamic_prefix,
++                                               allow_legacy_concat=True)[0]
++                        for item in values)
++
++    config.ADDRESS = inject_dynamic_prefix(config.ADDRESS, dynamic_prefix,
++                                           allow_legacy_concat=True)[0]
++    config.NAMESERVER = expand(config.NAMESERVER)
++    config.NTP_SERVER = expand(config.NTP_SERVER)
++    config.SNTP_SERVERS = expand(config.SNTP_SERVERS)
++    config.DNS_UPDATE_NAMESERVER = inject_dynamic_prefix(
++        config.DNS_UPDATE_NAMESERVER, dynamic_prefix, allow_legacy_concat=True)[0]
++    for bootfile in config.BOOTFILES.values():
++        # URLs contain the IPv6 literal in brackets; expand that literal rather
++        # than validating the complete URL as an IPv6 address.
++        bootfile.BOOTFILE_URL = re.sub(
++            r'\[([^]]+)\]',
++            lambda match: '[' + inject_dynamic_prefix(
++                match.group(1), dynamic_prefix, allow_legacy_concat=True)[0] + ']',
++            bootfile.BOOTFILE_URL)
++    for client_class in config.CLASSES.values():
++        client_class.NAMESERVER = expand(client_class.NAMESERVER)
++        client_class.NTP_SERVER = expand(client_class.NTP_SERVER)
++
++
+ # needed for boolean options
+ BOOLPOOL = {'0': False, '1': True, 'no': False, 'yes': True, 'false': False, 'true': True, False: False, True: True,
+             'on': True, 'off': False}
+@@ -295,7 +334,7 @@ class Config:
+         except getopt.GetoptError as err:
+             print(err)
+             print(USAGE)
+-            sys.exit(0)
++            sys.exit(2)
+ 
+         if configfile is None:
+             error_exit('No config file given - please use --config <config.file>')
+@@ -469,6 +508,9 @@ class Config:
+                             self.CLASSES[section.lower().split('class_', 1)[1]].__setattr__(item[0].upper(),
+                                                                                          str(item[1]).strip())
+ 
++        # Expand literal server and option addresses before listification and validation.
++        inject_dynamic_prefix_options(self, self.PREFIX)
++
+         # The next paragraphs contain finetuning
+         self.IDENTIFICATION = listify_option(self.IDENTIFICATION)
+ 
+@@ -845,11 +887,17 @@ class Config:
+         if self.REQUEST_LIMIT_IDENTIFICATION not in ['mac', 'llip']:
+             error_exit(f"{msg_prefix} Request limit identification must be one of 'mac' or 'llip'.")
+ 
++        # check if cleaning interval is a number
++        if not str(self.CLEANING_INTERVAL).isdigit():
++            error_exit(f"{msg_prefix} Cleaning interval "
++                       f"'{self.CLEANING_INTERVAL}' is invalid.")
++
+         # Make integers of number strings to avoid later repeated conversion
+         # more to come...
+         self.REQUEST_LIMIT_TIME = int(self.REQUEST_LIMIT_TIME)
+         self.REQUEST_LIMIT_COUNT = int(self.REQUEST_LIMIT_COUNT)
+         self.REQUEST_LIMIT_RELEASE_TIME = int(self.REQUEST_LIMIT_RELEASE_TIME)
++        self.CLEANING_INTERVAL = int(self.CLEANING_INTERVAL)
+ 
+         # cruise through classes
+         # more checks to come...
+--- dhcpy6d-1.7.0.orig/dhcpy6d/handler.py
++++ dhcpy6d-1.7.0/dhcpy6d/handler.py
+@@ -258,7 +258,7 @@ class RequestHandler(socketserver.Datagr
+                                                         transaction.options_request)
+ 
+                                     # store leases for addresses and lock advertised address
+-                                    volatile_store.store(deepcopy(transaction), timer.time)
++                                    volatile_store.store_async(deepcopy(transaction), timer.time)
+ 
+                                 # REQUEST
+                                 # if last request was a REQUEST (type 3) send a REPLY (type 7) back
+@@ -280,7 +280,7 @@ class RequestHandler(socketserver.Datagr
+                                                             [CONST.OPTION.PREFERENCE] +
+                                                             [CONST.OPTION.RAPID_COMMIT] + transaction.options_request)
+                                     # store leases for addresses
+-                                    volatile_store.store(deepcopy(transaction), timer.time)
++                                    volatile_store.store_async(deepcopy(transaction), timer.time)
+ 
+                                     # run external script for setting a route to the delegated prefix
+                                     if CONST.OPTION.IA_PD in transaction.ia_options:
+@@ -315,7 +315,7 @@ class RequestHandler(socketserver.Datagr
+                                                         [CONST.OPTION.PREFERENCE] +
+                                                         transaction.options_request)
+                                     # store leases for addresses
+-                                    volatile_store.store(deepcopy(transaction), timer.time)
++                                    volatile_store.store_async(deepcopy(transaction), timer.time)
+                                     if cfg.DNS_UPDATE:
+                                         dns_update(transaction)
+ 
+@@ -328,7 +328,7 @@ class RequestHandler(socketserver.Datagr
+                                                         [CONST.OPTION.PREFERENCE] +
+                                                         transaction.options_request)
+                                     # store leases for addresses
+-                                    volatile_store.store(deepcopy(transaction), timer.time)
++                                    volatile_store.store_async(deepcopy(transaction), timer.time)
+ 
+                                 # RELEASE
+                                 # if last request was a RELEASE (type 8) send a REPLY (type 7) back
+--- dhcpy6d-1.7.0.orig/dhcpy6d/helpers.py
++++ dhcpy6d-1.7.0/dhcpy6d/helpers.py
+@@ -18,6 +18,8 @@
+ 
+ from binascii import (hexlify,
+                       unhexlify)
++import string
++import ipaddress
+ import shlex
+ import socket
+ import sys
+@@ -211,6 +213,109 @@ def combine_prefix_length(prefix, length
+     return f'{prefix}/{length}'
+ 
+ 
++def normalize_route_prefix(prefix, length):
++    """
++    normalize route prefix for external helper calls
++    accepts internal 32-char hex notation, regular IPv6 addresses and legacy
++    shortened prefix stems without trailing '::'
++    """
++    if prefix is None:
++        raise Exception('route prefix is empty')
++    if type(prefix) == bytes:
++        prefix = prefix.decode()
++    if type(length) == bytes:
++        length = length.decode()
++
++    prefix = str(prefix).strip().lower()
++    length = str(length).strip()
++
++    if prefix == '':
++        raise Exception('route prefix is empty')
++
++    if '/' in prefix:
++        prefix = prefix.split('/', 1)[0]
++
++    # internally prefixes are often kept as 32-char hex strings
++    if len(prefix) == 32 and ':' not in prefix:
++        prefix = colonify_ip6(prefix)
++    # old or stale route entries may only contain the visible prefix stem
++    elif ':' in prefix and '::' not in prefix and prefix.count(':') < 7:
++        prefix += '::'
++
++    network = ipaddress.IPv6Network(f'{prefix}/{length}', strict=False)
++    return network.network_address.exploded
++
++
++def inject_dynamic_prefix(value, dynamic_prefix, allow_legacy_concat=False):
++    """
++    replace $prefix$ in client config values
++    if a hexadecimal character follows immediately, force a ':' separator to
++    avoid creating overlong hextets (collision-prone concat)
++    returns tuple(value, collision_detected)
++    """
++    if not isinstance(value, str) or '$prefix$' not in value:
++        return value, False
++
++    if dynamic_prefix is None:
++        dynamic_prefix = ''
++    # dynamic prefix should not carry prefix length in textual replacements
++    dynamic_prefix = str(dynamic_prefix).split('/', 1)[0]
++
++    marker = '$prefix$'
++    collision = False
++    result = ''
++    rest = value
++
++    while marker in rest:
++        left, right = rest.split(marker, 1)
++        replacement = dynamic_prefix
++        if right and right[0].lower() in string.hexdigits and not dynamic_prefix.endswith(':'):
++            # Keep best compatibility with undocumented legacy patterns.
++            # Prefer legacy concat when it still fits into one hextet.
++            right_hex = ''
++            for c in right.lower():
++                if c in string.hexdigits:
++                    right_hex += c
++                else:
++                    break
++
++            last_hextet_len = 0
++            if ':' in dynamic_prefix:
++                last = dynamic_prefix.rsplit(':', 1)[1]
++                if last != '':
++                    last_hextet_len = len(last)
++
++            can_concat = bool(right_hex) and last_hextet_len > 0 and (last_hextet_len + len(right_hex) <= 4)
++
++            if allow_legacy_concat and can_concat:
++                separator_candidates = ['', ':', '::']
++            elif '::' in right:
++                separator_candidates = [':', '', '::']
++            elif ':' in right:
++                separator_candidates = ['::', ':', '']
++            else:
++                separator_candidates = [':', '', '::']
++
++            chosen_separator = ':'
++            for separator in separator_candidates:
++                try:
++                    # only validate the immediate expansion candidate
++                    right_for_validation = right.split('/', 1)[0]
++                    decompress_ip6(dynamic_prefix + separator + right_for_validation)
++                    chosen_separator = separator
++                    break
++                except Exception:
++                    continue
++
++            replacement = dynamic_prefix + chosen_separator
++            collision = chosen_separator != ''
++        result += left + replacement
++        rest = right
++
++    result += rest
++    return result, collision
++
++
+ def split_prefix(prefix):
+     """
+     split prefix and length from 'prefix/length' notation
+@@ -243,7 +348,7 @@ def listify_option(option):
+         if type(option) == str:
+             lex = shlex.shlex(option)
+             lex.whitespace = WHITESPACE
+-            lex.wordchars += ':.-/'
++            lex.wordchars += ':.-/$'
+             return list(lex)
+         elif type(option) == list:
+             return(option)
+--- dhcpy6d-1.7.0.orig/dhcpy6d/macs.py
++++ dhcpy6d-1.7.0/dhcpy6d/macs.py
+@@ -117,20 +117,20 @@ def get_neighbor_cache_linux(if_number,
+                                                                                           answer_pos)
+             # basic safety checks for received data (imitates NLMSG_OK)
+             if nlmsg_len < struct.calcsize(f'<{nlmsghdr_fmt}'):
+-                log.warn('broken data from netlink (position {0}, nlmsg_len {1}): '
+-                         'nlmsg_len is smaller than structure size'.format(answer_pos, nlmsg_len))
++                log.warning('broken data from netlink (position {0}, nlmsg_len {1}): '
++                            'nlmsg_len is smaller than structure size'.format(answer_pos, nlmsg_len))
+                 break
+             if answer_len - answer_pos < struct.calcsize(f'<{nlmsghdr_fmt}'):
+-                log.warn(f'broken data from netlink (position {answer_pos}, length avail {answer_len - answer_pos}): '
+-                         'received data size is smaller than structure size')
++                log.warning(f'broken data from netlink (position {answer_pos}, length avail {answer_len - answer_pos}): '
++                            'received data size is smaller than structure size')
+                 break
+             if answer_len - answer_pos < nlmsg_len:
+-                log.warn(f'broken data from netlink (position {answer_pos}, length avail {answer_len - answer_pos}): '
+-                         'received dcolonify_ata size is smaller than nlmsg_len')
++                log.warning(f'broken data from netlink (position {answer_pos}, length avail {answer_len - answer_pos}): '
++                            'received dcolonify_ata size is smaller than nlmsg_len')
+                 break
+             if pid != nlmsg_pid or seq != nlmsg_seq:
+-                log.warn(f'broken data from netlink (position {answer_pos}, length avail {answer_len - answer_pos}): '
+-                         f'invalid seq ({seq} x {nlmsg_seq}) or pid ({pid} x {nlmsg_pid})')
++                log.warning(f'broken data from netlink (position {answer_pos}, length avail {answer_len - answer_pos}): '
++                            f'invalid seq ({seq} x {nlmsg_seq}) or pid ({pid} x {nlmsg_pid})')
+                 break
+ 
+             # data for this Routing/device hook record
+@@ -141,12 +141,12 @@ def get_neighbor_cache_linux(if_number,
+             if nlmsg_type == NLMSG_ERROR:
+                 nlmsgerr_error, nlmsgerr_len, nlmsgerr_type, nlmsgerr_flags, nlmsgerr_seq, nlmsgerr_pid = \
+                     struct.unpack_from('<sIHHII', nlmsg_data)
+-                log.warn(f'broken data from netlink (position {answer_pos}, length avail {answer_len - answer_pos}): '
+-                         f'invalid message (errno {nlmsgerr_error})')
++                log.warning(f'broken data from netlink (position {answer_pos}, length avail {answer_len - answer_pos}): '
++                            f'invalid message (errno {nlmsgerr_error})')
+                 break
+             if nlmsg_type not in [RTM_NEWNEIGH, RTM_DELNEIGH, RTM_GETNEIGH]:
+-                log.warn(f'broken data from netlink (position {answer_pos}, length avail {answer_len - answer_pos}): '
+-                         f'this is really weird, wrong message type {nlmsg_type}')
++                log.warning(f'broken data from netlink (position {answer_pos}, length avail {answer_len - answer_pos}): '
++                            f'this is really weird, wrong message type {nlmsg_type}')
+                 break
+ 
+             curr_pos = answer_pos + nlmsg_header_len
+@@ -195,9 +195,9 @@ def get_neighbor_cache_linux(if_number,
+                 if nda['NDM_IFINDEX'] not in if_number:
+                     log.debug(f"can't find device for interface index {nda['NDM_IFINDEX']}")
+                 elif 'NDA_DST' not in nda:
+-                    log.warn(f"can't find destination address (wrong entry state: {nda['NDM_STATE']}?!)")
++                    log.warning(f"can't find destination address (wrong entry state: {nda['NDM_STATE']}?!)")
+                 elif 'NDA_LLADDR' not in nda:
+-                    log.warn(f"can't find local hardware address (wrong entry state: {nda['NDM_STATE']}?!)")
++                    log.warning(f"can't find local hardware address (wrong entry state: {nda['NDM_STATE']}?!)")
+                 else:
+                     if if_number[nda['NDM_IFINDEX']] in cfg.INTERFACE and not nda['NDA_LLADDR'].startswith('33:33:'):
+                         # store neighbor caches entries
+@@ -211,8 +211,8 @@ def get_neighbor_cache_linux(if_number,
+             answer_pos += nlmsg_len
+ 
+     except struct.error as e:
+-        log.warn(f'broken data from netlink (position {answer_pos}, '
+-                 f'data[{curr_pos}:{answer_len}] = {hexlify(answer[curr_pos:curr_pos + 8])}...): {str(e)}')
++        log.warning(f'broken data from netlink (position {answer_pos}, '
++                    f'data[{curr_pos}:{answer_len}] = {hexlify(answer[curr_pos:curr_pos + 8])}...): {str(e)}')
+ 
+     # clean up
+     s.close()
+--- dhcpy6d-1.7.0.orig/dhcpy6d/options/option_25.py
++++ dhcpy6d-1.7.0/dhcpy6d/options/option_25.py
+@@ -20,10 +20,10 @@ from binascii import hexlify
+ from socket import (AF_INET6,
+                     inet_pton)
+ 
+-from dhcpy6d import collected_macs
+ from dhcpy6d.client import Client
+ from dhcpy6d.config import cfg
+ from dhcpy6d.constants import CONST
++from dhcpy6d.globals import collected_macs
+ from dhcpy6d.helpers import (colonify_ip6,
+                              combine_prefix_length)
+ from dhcpy6d.options import OptionTemplate
+--- dhcpy6d-1.7.0.orig/dhcpy6d/options/option_3.py
++++ dhcpy6d-1.7.0/dhcpy6d/options/option_3.py
+@@ -20,10 +20,10 @@ from binascii import hexlify
+ from socket import (AF_INET6,
+                     inet_pton)
+ 
+-from dhcpy6d import collected_macs
+ from dhcpy6d.client import Client
+ from dhcpy6d.config import cfg
+ from dhcpy6d.constants import CONST
++from dhcpy6d.globals import collected_macs
+ from dhcpy6d.helpers import colonify_ip6
+ from dhcpy6d.options import OptionTemplate
+ 
+--- dhcpy6d-1.7.0.orig/dhcpy6d/options/option_4.py
++++ dhcpy6d-1.7.0/dhcpy6d/options/option_4.py
+@@ -20,10 +20,10 @@ from binascii import hexlify
+ from socket import (AF_INET6,
+                     inet_pton)
+ 
+-from dhcpy6d import collected_macs
+ from dhcpy6d.client import Client
+ from dhcpy6d.config import cfg
+ from dhcpy6d.constants import CONST
++from dhcpy6d.globals import collected_macs
+ from dhcpy6d.helpers import colonify_ip6
+ from dhcpy6d.options import OptionTemplate
+ 
+--- dhcpy6d-1.7.0.orig/dhcpy6d/route.py
++++ dhcpy6d-1.7.0/dhcpy6d/route.py
+@@ -19,6 +19,7 @@
+ from .config import cfg
+ from .globals import (route_queue,
+                       timer)
++from .helpers import normalize_route_prefix
+ from .log import log
+ from .storage import volatile_store
+ 
+@@ -81,12 +82,55 @@ def manage_prefixes_routes():
+     inactive_prefixes = volatile_store.get_inactive_prefixes()
+     active_prefixes = volatile_store.get_active_prefixes()
+ 
++    def stale_prefix_configuration(prefix):
++        record = volatile_store.get_prefix_record(prefix)
++        if record is None:
++            return True
++        _prefix, length, ptype, pclass, _active = record
++        if pclass not in cfg.CLASSES:
++            return True
++        if ptype not in cfg.CLASSES[pclass].PREFIXES:
++            return True
++        if ptype not in cfg.PREFIXES:
++            return True
++        if str(cfg.PREFIXES[ptype].LENGTH) != str(length):
++            return True
++        return False
++
+     for prefix in inactive_prefixes:
+         length, router, pclass = volatile_store.get_route(prefix)
++        try:
++            normalize_route_prefix(prefix, length)
++        except Exception as err:
++            log.error(f"manage_prefixes_routes: removing invalid persisted route '{prefix}/{length}' via "
++                      f"'{router}': {err}")
++            volatile_store.remove_route(prefix)
++            continue
++        if stale_prefix_configuration(prefix):
++            log.error(f"manage_prefixes_routes: deconfiguring stale route for prefix '{prefix}'")
++            volatile_store.deactivate_prefix(prefix)
++            volatile_store.remove_route(prefix)
++            if pclass in cfg.CLASSES:
++                route_queue.put(('down', cfg.CLASSES[pclass].CALL_DOWN, prefix, length, router))
++            continue
+         if pclass in cfg.CLASSES:
+             route_queue.put(('down', cfg.CLASSES[pclass].CALL_DOWN, prefix, length, router))
+ 
+     for prefix in active_prefixes:
+         length, router, pclass = volatile_store.get_route(prefix)
++        try:
++            normalize_route_prefix(prefix, length)
++        except Exception as err:
++            log.error(f"manage_prefixes_routes: removing invalid persisted route '{prefix}/{length}' via "
++                      f"'{router}': {err}")
++            volatile_store.remove_route(prefix)
++            continue
++        if stale_prefix_configuration(prefix):
++            log.error(f"manage_prefixes_routes: deconfiguring stale route for prefix '{prefix}'")
++            volatile_store.deactivate_prefix(prefix)
++            volatile_store.remove_route(prefix)
++            if pclass in cfg.CLASSES:
++                route_queue.put(('down', cfg.CLASSES[pclass].CALL_DOWN, prefix, length, router))
++            continue
+         if pclass in cfg.CLASSES:
+             route_queue.put(('up', cfg.CLASSES[pclass].CALL_UP, prefix, length, router))
+--- dhcpy6d-1.7.0.orig/dhcpy6d/storage/__init__.py
++++ dhcpy6d-1.7.0/dhcpy6d/storage/__init__.py
+@@ -16,6 +16,7 @@
+ # along with this program; if not, write to the Free Software
+ # Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301, USA
+ 
++import atexit
+ import sys
+ import threading
+ import traceback
+@@ -38,6 +39,21 @@ from .store import (ClientConfig,
+ from .textfile import Textfile
+ 
+ 
++class AsyncQuery:
++    """A query whose result is intentionally not returned to a caller."""
++    def __init__(self, query, callback=None):
++        self.query = query
++        self.callback = callback
++
++
++class AsyncStore:
++    """A complete lease-store operation run by the database worker."""
++    def __init__(self, transaction, now, callback=None):
++        self.transaction = transaction
++        self.now = now
++        self.callback = callback
++
++
+ class QueryQueue(threading.Thread):
+     """
+     Pump queries around
+@@ -55,15 +71,26 @@ class QueryQueue(threading.Thread):
+         answer queue
+         """
+         while True:
+-            query = self.query_queue.get()
++            queued_query = self.query_queue.get()
++            async_query = isinstance(queued_query, AsyncQuery)
++            async_store = isinstance(queued_query, AsyncStore)
++            query = queued_query.query if async_query else queued_query
+             try:
+-                answer = self.store.db_query(query)
++                if async_store:
++                    answer = self.store.store(queued_query.transaction, queued_query.now,
++                                              query_function=self.store.db_query,
++                                              batch_function=self.store.db_query_batch)
++                else:
++                    answer = self.store.db_query(query)
+             except Exception as error:
+                 traceback.print_exc(file=sys.stdout)
+                 sys.stdout.flush()
+                 answer = error
+ 
+-            self.answer_queue.put({query: answer})
++            if not async_query and not async_store:
++                self.answer_queue.put({query: answer})
++            elif queued_query.callback is not None:
++                queued_query.callback(answer)
+ 
+ 
+ # because of thread trouble there should not be too much db connections at once
+@@ -100,3 +127,20 @@ if not config_store.connected:
+     error_exit('Configuration database is not connected!')
+ if not volatile_store.connected:
+     error_exit('Database for volatile data is not connected!')
++
++
++def close_stores():
++    """
++    Close import-time storage connections during interpreter shutdown.
++    """
++    seen = set()
++    for store in (config_store, volatile_store):
++        if id(store) in seen:
++            continue
++        seen.add(id(store))
++        close = getattr(store, 'close', None)
++        if close is not None:
++            close()
++
++
++atexit.register(close_stores)
+--- dhcpy6d-1.7.0.orig/dhcpy6d/storage/sqlite.py
++++ dhcpy6d-1.7.0/dhcpy6d/storage/sqlite.py
+@@ -71,6 +71,14 @@ class SQLite(Store):
+         execute query on DB
+         """
+         try:
++            if isinstance(query, tuple):
++                self.cursor.execute('BEGIN')
++                for statement in query:
++                    self.cursor.execute(statement)
++                self.connection.commit()
++                self.connected = True
++                return []
++
+             self.cursor.execute(query)
+             # commit only if explicitly wanted
+             if query.startswith('INSERT'):
+@@ -81,6 +89,8 @@ class SQLite(Store):
+                 self.connection.commit()
+             self.connected = True
+         except self.db_module.IntegrityError:
++            if isinstance(query, tuple):
++                self.connection.rollback()
+             return 'INSERT_ERROR'
+         except Exception as err:
+             # try to reestablish database connection
+@@ -91,3 +101,11 @@ class SQLite(Store):
+ 
+         result = self.cursor.fetchall()
+         return result
++
++    def query_batch(self, queries):
++        """Run a group of lease writes in one SQLite transaction."""
++        return self.query(tuple(queries))
++
++    def db_query_batch(self, queries):
++        """Run a group of lease writes directly in one SQLite transaction."""
++        return self.db_query(tuple(queries))
+--- dhcpy6d-1.7.0.orig/dhcpy6d/storage/store.py
++++ dhcpy6d-1.7.0/dhcpy6d/storage/store.py
+@@ -25,7 +25,9 @@ from ..helpers import (decompress_ip6,
+                        error_exit,
+                        listify_option,
+                        NeighborCacheRecord,
+-                       convert_prefix_inline)
++                       convert_prefix_inline,
++                       inject_dynamic_prefix)
++from ..log import log
+ from .schemas import (legacy_adjustments,
+                       MYSQL_SQLITE)
+ 
+@@ -50,7 +52,15 @@ class ClientConfig:
+             else:
+                 addresses = listify_option(address)
+             for a in addresses:
+-                self.ADDRESS.append(decompress_ip6(a))
++                if isinstance(a, str):
++                    a, collision = inject_dynamic_prefix(a, cfg.PREFIX, allow_legacy_concat=True)
++                    if collision:
++                        log.error(f"Client configuration database: implicit $prefix$ concatenation in "
++                                  f"ADDRESS '{a}'")
++                try:
++                    self.ADDRESS.append(decompress_ip6(a))
++                except Exception as err:
++                    error_exit(f"Client configuration database: invalid ADDRESS '{a}': {err}")
+         else:
+             self.ADDRESS = None
+ 
+@@ -62,7 +72,15 @@ class ClientConfig:
+             else:
+                 prefixes = listify_option(prefix)
+             for p in prefixes:
+-                self.PREFIX.append(convert_prefix_inline(p))
++                if isinstance(p, str):
++                    p, collision = inject_dynamic_prefix(p, cfg.PREFIX, allow_legacy_concat=True)
++                    if collision:
++                        log.error(f"Client configuration database: implicit $prefix$ concatenation in "
++                                  f"PREFIX '{p}'")
++                try:
++                    self.PREFIX.append(convert_prefix_inline(p))
++                except Exception as err:
++                    error_exit(f"Client configuration database: invalid PREFIX '{p}': {err}")
+         else:
+             self.PREFIX = None
+ 
+@@ -124,6 +142,20 @@ class Store:
+         # schema version of client config entries
+         self.config_schema_version = 1
+ 
++    def close(self):
++        """
++        Close any backend resources held by the store.
++        """
++        for resource_name in ('cursor', 'connection'):
++            resource = getattr(self, resource_name, None)
++            close = getattr(resource, 'close', None)
++            if close is not None:
++                try:
++                    close()
++                except Exception:
++                    pass
++        self.connected = False
++
+     def query(self, query):
+         """
+         put queries received into query queue and return the answers from answer queue
+@@ -140,6 +172,55 @@ class Store:
+                     answer = self.answers.pop(query)
+         return answer
+ 
++    def query_batch(self, queries):
++        """Execute write queries in order.
++
++        Backends with transaction support may override this to make a batch
++        atomic. The default preserves the existing behavior.
++        """
++        return [self.query(query) for query in queries]
++
++    def db_query_batch(self, queries):
++        """Execute a write batch directly in a database worker."""
++        return [self.db_query(query) for query in queries]
++
++    def query_async(self, query, callback=None):
++        """Submit a write without waiting for its database result."""
++        from . import AsyncQuery
++        self.query_queue.put(AsyncQuery(query, callback))
++
++    def query_batch_async(self, queries, callback=None):
++        """Submit a group of writes without waiting for its database result."""
++        self.query_async(tuple(queries), callback)
++
++    def reserve_advertised_leases(self, transaction):
++        """Keep a SOLICIT allocation visible until its async write finishes."""
++        if transaction.last_message_received_type != 1:
++            return None
++        reservations = getattr(self, 'pending_advertised_leases', None)
++        if reservations is None:
++            reservations = {}
++            self.pending_advertised_leases = reservations
++        token = id(transaction)
++        reservations[token] = (transaction.mac, transaction.duid, transaction.iaid,
++                               [(address.ADDRESS, address.CATEGORY, address.TYPE)
++                                for address in transaction.client.addresses])
++        return token
++
++    def release_advertised_lease_reservation(self, token):
++        if token is not None:
++            self.pending_advertised_leases.pop(token, None)
++
++    def store_async(self, transaction, now):
++        """Queue all lease reads and writes outside the DHCP response path."""
++        from . import AsyncStore
++        reservation = self.reserve_advertised_leases(transaction)
++        self.query_queue.put(AsyncStore(
++            transaction,
++            now,
++            callback=lambda _answer: self.release_advertised_lease_reservation(reservation),
++        ))
++
+     def clean_query_answer(method):
+         """
+         decorate repeatedly but not everywhere used cleaning of query answer
+@@ -227,16 +308,20 @@ class Store:
+             self.config_prefix_support = True
+             return True
+ 
+-    def store(self, transaction, now):
++    def store(self, transaction, now, wait_for_writes=True, query_function=None, batch_function=None):
+         """
+         store lease in lease DB
+         """
++        query_function = query_function or self.query
++        batch_function = batch_function or self.query_batch
++
+         # only if client exists
+         if transaction.client:
++            write_queries = []
+             for a in transaction.client.addresses:
+                 if a.ADDRESS is not None:
+                     query = f"SELECT address FROM {self.table_leases} WHERE address = '{a.ADDRESS}'"
+-                    answer = self.query(query)
++                    answer = query_function(query)
+                     if answer is not None:
+                         # if address is not leased yet add it
+                         if len(answer) == 0:
+@@ -259,14 +344,9 @@ class Store:
+                                     f"'{now}', " \
+                                     f"'{now + int(a.PREFERRED_LIFETIME)}', " \
+                                     f"'{now + int(a.VALID_LIFETIME)}')"
+-                            answer = self.query(query)
+-                            # for unknown reasons sometime a lease shall be inserted which already exists
+-                            # in this case go further (aka continue) and do an update instead of an insert
+-                            if answer == 'INSERT_ERROR':
+-                                print('IntegrityError:', query)
+-                            else:
+-                                # jump to next item of loop
+-                                continue
++                            write_queries.append(query)
++                            # jump to next item of loop
++                            continue
+                         # otherwise update it if not a random address
+                         if a.CATEGORY != 'random':
+                             query = f"UPDATE {self.table_leases} " \
+@@ -292,12 +372,12 @@ class Store:
+                                     f"SET active = 1, " \
+                                     f"last_message = {transaction.last_message_received_type} " \
+                                     f"WHERE address = '{a.ADDRESS}'"
+-                        self.query(query)
++                        write_queries.append(query)
+ 
+             for p in transaction.client.prefixes:
+                 if p.PREFIX is not None:
+                     query = f"SELECT prefix FROM {self.table_prefixes} WHERE prefix = '{p.PREFIX}'"
+-                    answer = self.query(query)
++                    answer = query_function(query)
+                     if answer is not None:
+                         # if prefix is not leased yet add it
+                         if len(answer) == 0:
+@@ -320,12 +400,8 @@ class Store:
+                                     f"'{now}', " \
+                                     f"'{now + int(p.PREFERRED_LIFETIME)}', " \
+                                     f"'{now + int(p.VALID_LIFETIME)}')"
+-                            answer = self.query(query)
+-                            # for unknow reasons sometime a lease shall be inserted which already exists
+-                            # in this case go further (aka continue) and do an update instead of an insert
+-                            # doing this here for prefixes is just a precautional measure
+-                            if answer != 'INSERT_ERROR':
+-                                continue
++                            write_queries.append(query)
++                            continue
+                         # otherwise update it if not a random prefix
+                         # anyway right now only the categories 'range' and 'id' exist
+                         if p.CATEGORY != 'random':
+@@ -350,7 +426,16 @@ class Store:
+                                     f"SET last_message = {transaction.last_message_received_type}, " \
+                                     f"active = 1 " \
+                                     f"WHERE prefix = '{p.PREFIX}'"
+-                        self.query(query)
++                        write_queries.append(query)
++            if write_queries:
++                if wait_for_writes:
++                    batch_function(write_queries)
++                else:
++                    reservation = self.reserve_advertised_leases(transaction)
++                    self.query_batch_async(
++                        write_queries,
++                        callback=lambda _answer: self.release_advertised_lease_reservation(reservation),
++                    )
+             return True
+         # if no client -> False
+         return False
+@@ -525,6 +610,30 @@ class Store:
+         else:
+             return None, None, None
+ 
++    def get_prefix_record(self, prefix):
++        """
++        get persisted prefix metadata needed for stale-config guards
++        """
++        query = f"SELECT prefix, length, type, class, active FROM {self.table_prefixes} WHERE prefix = '{prefix}'"
++        answer = self.query(query)
++        if answer is not None and len(answer) > 0:
++            return answer[0]
++        return None
++
++    def deactivate_prefix(self, prefix):
++        """
++        mark a persisted prefix inactive so it is not reused as active lease
++        """
++        query = f"UPDATE {self.table_prefixes} SET active = 0, last_message = 0 WHERE prefix = '{prefix}'"
++        return self.query(query)
++
++    def deactivate_lease(self, address):
++        """
++        mark a persisted address lease inactive so it is not reused as active lease
++        """
++        query = f"UPDATE {self.table_leases} SET active = 0, last_message = 0 WHERE address = '{address}'"
++        return self.query(query)
++
+     @clean_query_answer
+     def release_lease(self, address, now):
+         """
+@@ -608,6 +717,13 @@ class Store:
+         """
+         check if there are already advertised addresses for client
+         """
++        for mac, duid, iaid, leases in getattr(self, 'pending_advertised_leases', {}).values():
++            if mac == transaction.mac and duid == transaction.duid and \
++                    (cfg.IGNORE_IAID or iaid == transaction.iaid):
++                for address, pending_category, pending_type in leases:
++                    if pending_category == category and pending_type == atype:
++                        return address
++
+         # attributes to identify host and lease
+         if cfg.IGNORE_IAID:
+             query = f"SELECT address FROM {self.table_leases} WHERE last_message = 1 AND " \
+--- dhcpy6d-1.7.0.orig/dhcpy6d/storage/textfile.py
++++ dhcpy6d-1.7.0/dhcpy6d/storage/textfile.py
+@@ -21,7 +21,8 @@ import configparser
+ from ..config import cfg, BOOLPOOL
+ from ..helpers import (decompress_ip6,
+                        error_exit,
+-                       listify_option, convert_prefix_inline)
++                       listify_option, convert_prefix_inline, inject_dynamic_prefix)
++from ..log import log
+ 
+ from .store import (ClientConfig,
+                     Store)
+@@ -87,14 +88,40 @@ class Textfile(Store):
+ 
+                 # Decompress IPv6-Addresses
+                 if self.hosts[hostname].ADDRESS is not None:
+-                    self.hosts[hostname].ADDRESS = [decompress_ip6(x) for x in self.hosts[hostname].ADDRESS]
++                    decompressed_addresses = []
++                    for x in self.hosts[hostname].ADDRESS:
++                        x, collision = inject_dynamic_prefix(x, cfg.PREFIX, allow_legacy_concat=True)
++                        if collision:
++                            log.error(f"Textfile client configuration: implicit $prefix$ concatenation in "
++                                      f"ADDRESS '{x}' for host '{self.hosts[hostname].HOSTNAME}'")
++                        try:
++                            decompressed_addresses.append(decompress_ip6(x))
++                        except Exception as err:
++                            error_exit(
++                                f"Textfile client configuration: invalid ADDRESS '{x}' "
++                                f"for host '{self.hosts[hostname].HOSTNAME}': {err}"
++                            )
++                    self.hosts[hostname].ADDRESS = decompressed_addresses
+ 
+                 # in case of multiple supplied prefixes convert them to list
+                 self.hosts[hostname].PREFIX = listify_option(self.hosts[hostname].PREFIX)
+ 
+                 # split prefix into address and length, verify address
+                 if self.hosts[hostname].PREFIX is not None:
+-                    self.hosts[hostname].PREFIX = [convert_prefix_inline(x) for x in self.hosts[hostname].PREFIX]
++                    converted_prefixes = []
++                    for x in self.hosts[hostname].PREFIX:
++                        x, collision = inject_dynamic_prefix(x, cfg.PREFIX, allow_legacy_concat=True)
++                        if collision:
++                            log.error(f"Textfile client configuration: implicit $prefix$ concatenation in "
++                                      f"PREFIX '{x}' for host '{self.hosts[hostname].HOSTNAME}'")
++                        try:
++                            converted_prefixes.append(convert_prefix_inline(x))
++                        except Exception as err:
++                            error_exit(
++                                f"Textfile client configuration: invalid PREFIX '{x}' "
++                                f"for host '{self.hosts[hostname].HOSTNAME}': {err}"
++                            )
++                    self.hosts[hostname].PREFIX = converted_prefixes
+ 
+                 # boolify prefix route link local setting
+                 if self.hosts[hostname].PREFIX_ROUTE_LINK_LOCAL:
+--- dhcpy6d-1.7.0.orig/dhcpy6d/threads.py
++++ dhcpy6d-1.7.0/dhcpy6d/threads.py
+@@ -38,6 +38,7 @@ from .globals import (collected_macs,
+                       timer,
+                       transactions)
+ from .helpers import colonify_ip6
++from .helpers import normalize_route_prefix
+ from .log import log
+ from .storage import volatile_store
+ 
+@@ -199,18 +200,26 @@ class RouteThread(Thread):
+         self.daemon = True
+         self.route_queue = route_queue
+ 
++    @staticmethod
++    def build_route_call(mode, call, prefix, length, router):
++        """
++            render route helper call with a normalized network prefix
++        """
++        return call.replace('$prefix$', normalize_route_prefix(prefix, length)). \
++            replace('$length$', str(length)). \
++            replace('$router$', colonify_ip6(router)). \
++            replace('$mode$', mode)
++
+     def run(self):
+         """
+             wait for new queries in queue until the end of the world
+         """
+         while True:
+             mode, call, prefix, length, router = self.route_queue.get()
+-            call_real = call.replace('$prefix$', colonify_ip6(prefix)). \
+-                replace('$length$', str(length)). \
+-                replace('$router$', colonify_ip6(router)). \
+-                replace('$mode$', mode)
++            call_real = f"{call} [prefix={prefix}, length={length}, router={router}, mode={mode}]"
+             # subprocess needs list as argument which it gets by split()
+             try:
++                call_real = self.build_route_call(mode, call, prefix, length, router)
+                 result = subprocess.call(call_real.split(' '))
+             except Exception as err:
+                 result = err
+--- dhcpy6d-1.7.0.orig/doc/dhcpy6d-clients.conf.rst
++++ dhcpy6d-1.7.0/doc/dhcpy6d-clients.conf.rst
+@@ -75,9 +75,15 @@ These attributes do not serve for identi
+ 
+ **address = <address> [<address> ...]**
+     Addresses configured here will be sent to a client in addition to the ones it gets due to its class. Might be useful for some extra static address definitions.
++    The *$prefix$* placeholder from *--prefix* can be used here as well.
++    Recommended style is explicit separation like *$prefix$:19::2*.
++    Older forms like *$prefix$19::2* are accepted for compatibility and may be interpreted
++    as legacy concat (for example *...:8f* + *19::2* -> *...:8f19::2*) when that still fits into one hextet.
++    If you always want a new hextet, use an explicit separator after *$prefix$*.
+ 
+ **prefix = <prefix> [<prefix> ...]**
+     Prefix configured here will be sent to client in addition to the ones it gets due to its class.
++    The *$prefix$* placeholder from *--prefix* can be used here as well.
+ 
+ **prefix_route_link_local = yes|no**
+     As default Link Local Address of requesting client is not used as router address for external call.
+@@ -152,4 +158,3 @@ See also
+ * dhcpy6d.conf(5)
+ * `<https://dhcpy6d.de>`_
+ * `<https://github.com/HenriWahl/dhcpy6d>`_
+-
+--- dhcpy6d-1.7.0.orig/doc/dhcpy6d.conf.rst
++++ dhcpy6d-1.7.0/doc/dhcpy6d.conf.rst
+@@ -83,6 +83,7 @@ environments.
+ 
+ **nameserver = <nameserver-address> [<nameserver-address> ...]**
+     If an address type is of category *dns* at least one nameserver has to be given here. If more than one is needed they have to be separated by spaces.
++    Literal IPv6 entries may use *$prefix$* when dhcpy6d is started with *--prefix*; see the placeholder section below.
+ 
+ **domain = <domain-name>**
+     The domain to be used with FQDN hostnames for option 39.
+@@ -91,7 +92,10 @@ environments.
+     Domain search lists to be used with option 24. If none is given the value of domain above is used. Multiple domains have to be separated by space or comma.
+ 
+ **ntp_server = <ntp_server> [<ntp_server> ...]**
+-    NTP servers to be used. <ntp_server> can be unicast addresses, multicast addresses or FQDNs following RFC 5908 for DHCPv6 option 56.
++    NTP servers to be used. <ntp_server> can be unicast addresses, multicast addresses or FQDNs following RFC 5908 for DHCPv6 option 56. Literal IPv6 entries may use *$prefix$*; FQDN entries are not changed.
++
++**sntp_servers = <sntp-server-address> [<sntp-server-address> ...]**
++    Legacy DHCPv6 option 31 server addresses. Literal IPv6 entries may use *$prefix$*.
+ 
+ **log = yes|no**
+     Enable logging.
+@@ -174,7 +178,8 @@ environments.
+     Dynamically update DNS. This works at the moment only with Bind DNS, but might be extended to others, maybe via call of an external command.
+     *Default: no*
+ 
+-**dns_update_nameserver = <nameserver-address> [<nameserver-address> ...]**
++**dns_update_nameserver = <nameserver-address>**
++    DNS update endpoint. A literal IPv6 entry may use *$prefix$*.
+ 
+ **dns_use_rndc = yes|no**
+     DNS updates might be able without RNDC key but this is not advised.
+@@ -209,7 +214,7 @@ environments.
+ **information_refresh_time = <seconds>**
+     The lifetime of information given to clients as response to an *information-request* message.
+     Used by option 83.
+-*Default: 600*
++    *Default: 600*
+ 
+ **solicitation_refresh_time = <seconds>**
+     The maximum time a client should wait before retransmitting a *solicit* message.
+@@ -307,8 +312,18 @@ There can be many address definitions wh
+     **$random64$**
+         A 64 bit random address will be generated in place of this variable. Clients get a random address just like they would if privacy extensions were used. The random part will span over 4 octets.
+ 
+-    **$prefix**
+-        This placeholder can be used instead of a literal prefix and uses the prefix given at calling dhcpy6d via the *--prefix* argument like *$prefix$::$id$*.
++    **$prefix$**
++        This placeholder can be used in address/prefix patterns, fixed client values, and literal IPv6 settings (server address, DNS update endpoint, nameserver, NTP server, and SNTP server). It uses the prefix given at calling dhcpy6d via the *--prefix* argument like *$prefix$::$id$*.
++        If text is appended directly, dhcpy6d keeps compatibility with older, undocumented patterns:
++
++        - explicit/new hextet (recommended): *$prefix$:19::2*
++        - legacy concat (when suffix can complete the previous hextet): *$prefix$19::2* -> *...:8f19::2*
++        - legacy compact suffix with colon: *$prefix$dead:beef* (interpreted like *$prefix$::dead:beef*)
++
++        For deterministic behavior, use explicit separators:
++
++        - use *:$suffix* to start a new hextet
++        - use direct concat only if you intentionally want to complete the previous hextet
+ 
+ **ia_type = na|ta**
+     IA (Identity Association) types can be one of non-temporary address *na* or temporary address *ta*. Default and probably most used is *na*.
+--- dhcpy6d-1.7.0.orig/doc/dhcpy6d.rst
++++ dhcpy6d-1.7.0/doc/dhcpy6d.rst
+@@ -66,7 +66,13 @@ Most configuration is done via the confi
+     Set the DUID for the server. This argument is used by /etc/init.d/dhcpy6d and /lib/systemd/system/dhcpy6d.service respectively.
+ 
+ **-p, --prefix=<prefix>**
+-    Set the prefix which will be substituted for the $prefix$ variable in address definitions. Useful for setups where the ISP uses a changing prefix.
++    Set the prefix which will be substituted for the $prefix$ variable in address definitions and literal IPv6 configuration values.
++    Useful for setups where the ISP uses a changing prefix.
++    The value is also used for fixed **address** and **prefix** entries in *dhcpy6d-clients.conf* and for server, DNS, and NTP endpoint addresses in *dhcpy6d.conf*.
++    If a hexadecimal character follows directly after *$prefix$* (for example *$prefix$19::2*),
++    dhcpy6d applies compatibility heuristics.
++    Use explicit separators for deterministic behavior: *$prefix$:19::2* starts a new hextet,
++    while *$prefix$19::2* may be treated as legacy concat and complete the previous hextet.
+ 
+ **-G, --generate-duid**
+     Generate DUID to be used in config file. This argument is used to generate a DUID for /etc/default/dhcpy6d. After generation dhcpy6d exits.
+@@ -113,5 +119,3 @@ See also
+ * dhcpy6d-clients.conf(5)
+ * `<https://dhcpy6d.de>`_
+ * `<https://github.com/HenriWahl/dhcpy6d>`_
+-
+-
+--- dhcpy6d-1.7.0.orig/etc/default/dhcpy6d
++++ dhcpy6d-1.7.0/etc/default/dhcpy6d
+@@ -1,2 +1,7 @@
+ # dhcpy6d is disabled by default
+ RUN=no
++
++# Enable dynamic prefix injection from dhcpcd delegated prefix (PD)
++# via /usr/lib/dhcpcd/dhcpcd-hooks/70-dhcpy6d.
++# Values: yes/no
++ENABLE_DYNAMIC_PREFIX_FROM_DHCPCD=no
+--- /dev/null
++++ dhcpy6d-1.7.0/scripts/generate_manpages.py
+@@ -0,0 +1,52 @@
++#!/usr/bin/env python3
++"""
++Generate manpages from RST sources.
++"""
++
++from __future__ import annotations
++
++import argparse
++import pathlib
++import subprocess
++import sys
++
++
++ROOT = pathlib.Path(__file__).resolve().parents[1]
++
++MAPPINGS = [
++    ("doc/dhcpy6d.rst", "man/man8/dhcpy6d.8"),
++    ("doc/dhcpy6d.conf.rst", "man/man5/dhcpy6d.conf.5"),
++    ("doc/dhcpy6d-clients.conf.rst", "man/man5/dhcpy6d-clients.conf.5"),
++]
++
++
++def main() -> int:
++    parser = argparse.ArgumentParser()
++    parser.add_argument("--out-dir", default=".", help="target repository/build root")
++    args = parser.parse_args()
++
++    out_root = pathlib.Path(args.out_dir).resolve()
++    try:
++        rst2man = subprocess.run(
++            ["which", "rst2man"],
++            check=True,
++            stdout=subprocess.PIPE,
++            stderr=subprocess.PIPE,
++            text=True,
++        ).stdout.strip()
++    except subprocess.CalledProcessError:
++        print("rst2man not found. Install python3-docutils.", file=sys.stderr)
++        return 1
++
++    for src_rel, dst_rel in MAPPINGS:
++        src = ROOT / src_rel
++        dst = out_root / dst_rel
++        dst.parent.mkdir(parents=True, exist_ok=True)
++        subprocess.run([rst2man, str(src), str(dst)], check=True)
++        print(f"generated {dst}")
++
++    return 0
++
++
++if __name__ == "__main__":
++    sys.exit(main())
+--- /dev/null
++++ dhcpy6d-1.7.0/scripts/test-debian-python.sh
+@@ -0,0 +1,37 @@
++#!/usr/bin/env bash
++set -euo pipefail
++
++if ! command -v docker >/dev/null 2>&1; then
++    echo "docker is required to run Debian Python compatibility tests." >&2
++    exit 1
++fi
++
++repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
++
++if [ "$#" -gt 0 ]; then
++    suites=("$@")
++else
++    suites=(stable oldstable)
++fi
++
++for suite in "${suites[@]}"; do
++    image="debian:${suite}"
++    echo "==> Testing ${image}"
++
++    docker run --rm \
++        -e DEBIAN_FRONTEND=noninteractive \
++        -v "${repo_root}:/src:ro" \
++        "${image}" \
++        bash -euxc '
++            apt-get update
++            apt-get install -y --no-install-recommends python3 ca-certificates
++
++            mkdir -p /work
++            cp -a /src/dhcpy6d /src/tests /src/main.py /src/setup.py /work/
++            cd /work
++
++            python3 --version
++            python3 -m compileall -q dhcpy6d tests main.py setup.py
++            python3 -Wd -m unittest -q
++        '
++done
+--- dhcpy6d-1.7.0.orig/setup.py
++++ dhcpy6d-1.7.0/setup.py
+@@ -25,16 +25,34 @@ import os
+ import os.path
+ from setuptools import setup, find_packages
+ import shutil
++import subprocess
+ 
+ # workaround to get dhcpy6d-startscript created
+ try:
+     if not os.path.exists('sbin'):
+         os.mkdir('sbin')
+     shutil.copyfile('main.py', 'sbin/dhcpy6d')
+-    os.chmod('sbin/dhcpy6d', 0o554)
++    os.chmod('sbin/dhcpy6d', 0o755)
+ except:
+     print('could not copy main.py to sbin/dhcpy6d')
+ 
++
++def generate_manpages():
++    """
++    Generate manpages from doc/*.rst if possible.
++    """
++    try:
++        subprocess.check_call(['python3', 'scripts/generate_manpages.py', '--out-dir', '.'])
++    except Exception as err:
++        print(f'could not generate manpages: {err}')
++
++
++def existing(paths):
++    return [p for p in paths if os.path.exists(p)]
++
++
++generate_manpages()
++
+ classifiers = [
+     'Intended Audience :: System Administrators',
+     'Development Status :: 5 - Production/Stable',
+@@ -55,9 +73,9 @@ data_files = [('/var/lib/dhcpy6d', ['var
+                                           'doc/LICENSE',
+                                           'doc/volatile.sql',
+                                           'doc/volatile.postgresql']),
+-              ('/usr/share/man/man5', ['man/man5/dhcpy6d.conf.5',
+-                                       'man/man5/dhcpy6d-clients.conf.5']),
+-              ('/usr/share/man/man8', ['man/man8/dhcpy6d.8']),
++              ('/usr/share/man/man5', existing(['man/man5/dhcpy6d.conf.5',
++                                                'man/man5/dhcpy6d-clients.conf.5'])),
++              ('/usr/share/man/man8', existing(['man/man8/dhcpy6d.8'])),
+               ('/etc', ['etc/dhcpy6d.conf']),
+               ('/usr/sbin', ['sbin/dhcpy6d']),
+               ]
+--- /dev/null
++++ dhcpy6d-1.7.0/tests/__init__.py
+@@ -0,0 +1 @@
++
+--- /dev/null
++++ dhcpy6d-1.7.0/tests/test_prefix_substitution.py
+@@ -0,0 +1,549 @@
++import atexit
++import importlib
++import os
++import sys
++import tempfile
++import unittest
++from types import SimpleNamespace
++
++
++# dhcpy6d parses CLI args at import time, so provide a minimal portable config first.
++_TEMP_VOLATILE_DB = tempfile.NamedTemporaryFile(suffix='.sqlite', delete=False)
++_TEMP_VOLATILE_DB.close()
++_TEMP_CONFIG = tempfile.NamedTemporaryFile('w', suffix='.conf', delete=False)
++_TEMP_CONFIG.write('[dhcpy6d]\n')
++_TEMP_CONFIG.write('interface = eth0\n')
++_TEMP_CONFIG.write('ignore_interface = yes\n')
++_TEMP_CONFIG.write('store_config = none\n')
++_TEMP_CONFIG.write(f'store_sqlite_volatile = {_TEMP_VOLATILE_DB.name}\n')
++_TEMP_CONFIG.flush()
++_TEMP_CONFIG.close()
++_ORIGINAL_ARGV = list(sys.argv)
++sys.argv = [sys.argv[0], '--config', _TEMP_CONFIG.name]
++
++# Optional runtime dependency in this repo; tests here don't exercise DNS behavior.
++import types
++
++_dns = types.ModuleType('dns')
++_dns_query = types.ModuleType('dns.query')
++_dns_reversename = types.ModuleType('dns.reversename')
++_dns_resolver = types.ModuleType('dns.resolver')
++_dns_update = types.ModuleType('dns.update')
++_dns_tsigkeyring = types.ModuleType('dns.tsigkeyring')
++
++
++class _DummyResolver:
++    def __init__(self):
++        self.nameservers = []
++
++
++class _DummyDnsError(Exception):
++    pass
++
++
++_dns_resolver.Resolver = _DummyResolver
++_dns_resolver.NoAnswer = _DummyDnsError
++_dns_resolver.NoNameservers = _DummyDnsError
++_dns_tsigkeyring.from_text = lambda *_args, **_kwargs: {}
++_dns.query = _dns_query
++_dns.reversename = _dns_reversename
++_dns.resolver = _dns_resolver
++_dns.update = _dns_update
++_dns.tsigkeyring = _dns_tsigkeyring
++sys.modules.setdefault('dns', _dns)
++sys.modules.setdefault('dns.query', _dns_query)
++sys.modules.setdefault('dns.reversename', _dns_reversename)
++sys.modules.setdefault('dns.resolver', _dns_resolver)
++sys.modules.setdefault('dns.update', _dns_update)
++sys.modules.setdefault('dns.tsigkeyring', _dns_tsigkeyring)
++
++_ORIGINAL_CHOWN = os.chown
++os.chown = lambda *_args, **_kwargs: None
++
++from dhcpy6d.client import Client
++from dhcpy6d.client.from_config import from_config
++from dhcpy6d.config import cfg
++from dhcpy6d.helpers import (inject_dynamic_prefix,
++                             normalize_route_prefix)
++from dhcpy6d.route import manage_prefixes_routes
++from dhcpy6d.storage.store import ClientConfig
++from dhcpy6d.threads import RouteThread
++from dhcpy6d.globals import route_queue, timer
++from dhcpy6d import route as route_module
++reuse_lease_module = importlib.import_module('dhcpy6d.client.reuse_lease')
++from_config_module = importlib.import_module('dhcpy6d.client.from_config')
++
++os.chown = _ORIGINAL_CHOWN
++sys.argv = _ORIGINAL_ARGV
++
++
++def _cleanup_temp_config():
++    for path in (_TEMP_CONFIG.name, _TEMP_VOLATILE_DB.name):
++        try:
++            os.unlink(path)
++        except FileNotFoundError:
++            pass
++
++
++atexit.register(_cleanup_temp_config)
++
++
++class MockTransaction:
++    def __init__(self):
++        self.ia_options = [3, 25]  # IA_NA and IA_PD
++        self.interface = 'eth0'
++        self.hostname = 'testclient'
++        self.duid = '00010001'
++        self.answer = 'normal'
++
++
++class MockClass:
++    def __init__(self):
++        self.INTERFACE = ['eth0']
++        self.ANSWER = 'normal'
++        self.ADDRESSES = []
++        self.BOOTFILES = []
++        self.PREFIXES = []
++        self.ADVERTISE = []
++
++
++class MockPrefixTransaction:
++    def __init__(self):
++        self.ia_options = [25]  # IA_PD
++        self.interface = 'eth0'
++        self.hostname = 'iserv'
++        self.duid = '00010001294b6c4f52540045fef0'
++        self.mac = '02:00:c0:a8:ff:31'
++        self.answer = 'normal'
++        self.prefixes = ['2001:0db8:0838:8f00:0000:0000:0000:0000/63']
++        self.addresses = []
++
++
++class MockAddressTransaction:
++    def __init__(self):
++        self.ia_options = [3]  # IA_NA
++        self.interface = 'eth0'
++        self.hostname = 'iserv'
++        self.duid = '00010001294b6c4f52540045fef0'
++        self.mac = '02:00:c0:a8:ff:31'
++        self.answer = 'normal'
++        self.addresses = ['2001:0db8:0838:8fa3:0000:0000:0000:0002']
++        self.prefixes = []
++
++
++class PrefixSubstitutionTest(unittest.TestCase):
++    def setUp(self):
++        self._old_prefix = cfg.PREFIX
++        self._old_classes = cfg.CLASSES
++        cfg.PREFIX = '2001:db8'
++        cfg.CLASSES = {'default': MockClass()}
++
++    def tearDown(self):
++        cfg.PREFIX = self._old_prefix
++        cfg.CLASSES = self._old_classes
++
++    def test_prefix_substitution_is_normalized_consistently(self):
++        cc = ClientConfig(
++            hostname='testclient',
++            client_class='default',
++            address='$prefix$::1',
++            prefix='$prefix$::/64',
++        )
++
++        # ClientConfig should already be normalized consistently.
++        self.assertEqual(cc.ADDRESS, ['20010db8000000000000000000000001'])
++        self.assertEqual(
++            cc.PREFIX,
++            [{'address': '20010db8000000000000000000000000', 'length': '64'}],
++        )
++
++        client = Client()
++        transaction = MockTransaction()
++        from_config(client=client, client_config=cc, transaction=transaction)
++
++        self.assertEqual(client.addresses[0].ADDRESS, '20010db8000000000000000000000001')
++        self.assertEqual(client.prefixes[0].PREFIX, '20010db8000000000000000000000000')
++        self.assertEqual(client.prefixes[0].LENGTH, '64')
++
++    def test_from_config_does_not_duplicate_fixed_address_from_class(self):
++        fixed_address = '20010db808388f000000c0fffea80002'
++        random_address = '20010db808388f000123456789abcdef'
++        original_addresses = cfg.ADDRESSES
++        original_parse_pattern_address = from_config_module.parse_pattern_address
++        cfg.CLASSES['default'].ADDRESSES = ['class_eui64', 'class_random']
++        cfg.ADDRESSES = {
++            'class_eui64': SimpleNamespace(
++                CATEGORY='eui64', IA_TYPE='na', PREFERRED_LIFETIME=5400,
++                VALID_LIFETIME=7200, CLASS='default', TYPE='class_eui64',
++                DNS_UPDATE=False, DNS_ZONE='', DNS_REV_ZONE='', DNS_TTL=0,
++            ),
++            'class_random': SimpleNamespace(
++                CATEGORY='random', IA_TYPE='ta', PREFERRED_LIFETIME=5400,
++                VALID_LIFETIME=7200, CLASS='default', TYPE='class_random',
++                DNS_UPDATE=False, DNS_ZONE='', DNS_REV_ZONE='', DNS_TTL=0,
++            ),
++        }
++        from_config_module.parse_pattern_address = lambda address, *_args: (
++            fixed_address if address.TYPE == 'class_eui64' else random_address
++        )
++        try:
++            client = Client()
++            transaction = MockTransaction()
++            client_config = ClientConfig(
++                hostname='paperless', client_class='default', address=fixed_address,
++            )
++            from_config(client=client, client_config=client_config, transaction=transaction)
++            self.assertEqual(
++                [(address.ADDRESS, address.IA_TYPE) for address in client.addresses],
++                [(fixed_address, 'na'), (random_address, 'ta')],
++            )
++        finally:
++            cfg.ADDRESSES = original_addresses
++            from_config_module.parse_pattern_address = original_parse_pattern_address
++
++    def test_prefix_substitution_keeps_legacy_concat_when_it_fits(self):
++        cfg.PREFIX = '2001:db8:10:20'
++
++        cc = ClientConfig(
++            hostname='iserv',
++            client_class='default',
++            address='$prefix$a3::2',
++            prefix='$prefix$::/63',
++        )
++
++        self.assertEqual(cc.ADDRESS, ['20010db8001020a30000000000000002'])
++        self.assertEqual(
++            cc.PREFIX,
++            [{'address': '20010db8001000200000000000000000', 'length': '63'}],
++        )
++
++    def test_inject_dynamic_prefix_reports_collision(self):
++        value, collision = inject_dynamic_prefix('$prefix$19::2', '2001:db8:8317')
++        self.assertEqual(value, '2001:db8:8317:19::2')
++        self.assertTrue(collision)
++
++    def test_inject_dynamic_prefix_uses_concat_when_hextet_can_be_completed(self):
++        value, collision = inject_dynamic_prefix('$prefix$00::/63', '2001:db8:838:8f', allow_legacy_concat=True)
++        self.assertEqual(value, '2001:db8:838:8f00::/63')
++        self.assertFalse(collision)
++
++    def test_client_config_prefix_concat_keeps_8f00_shape(self):
++        cfg.PREFIX = '2001:db8:838:8f'
++        cc = ClientConfig(
++            hostname='iserv',
++            client_class='default',
++            address='$prefix$a3::2',
++            prefix='$prefix$00::/63',
++        )
++        self.assertEqual(cc.ADDRESS, ['20010db808388fa30000000000000002'])
++        self.assertEqual(
++            cc.PREFIX,
++            [{'address': '20010db808388f000000000000000000', 'length': '63'}],
++        )
++
++    def test_integration_prefix_concat_stays_8f00_until_route_call(self):
++        cfg.PREFIX = '2001:db8:838:8f'
++        cc = ClientConfig(
++            hostname='iserv',
++            client_class='default',
++            address='$prefix$a3::2',
++            prefix='$prefix$00::/63',
++        )
++        client = Client()
++        transaction = MockTransaction()
++        transaction.mac = '02:00:c0:a8:ff:31'
++        transaction.duid = '00010001294b6c4f52540045fef0'
++        from_config(client=client, client_config=cc, transaction=transaction)
++
++        self.assertEqual(client.prefixes[0].PREFIX, '20010db808388f000000000000000000')
++        self.assertEqual(client.prefixes[0].LENGTH, '63')
++
++        call = RouteThread.build_route_call(
++            'up',
++            '/usr/sbin/dhcpy6d-add-route $prefix$/$length$ $router$ dmz_office',
++            client.prefixes[0].PREFIX,
++            client.prefixes[0].LENGTH,
++            'fe800000000000000000000000000002',
++        )
++        self.assertIn('2001:0db8:0838:8f00:0000:0000:0000:0000/63', call)
++
++    def test_inject_dynamic_prefix_prefers_legacy_double_colon_shape(self):
++        value, collision = inject_dynamic_prefix('$prefix$dead:beef', '2001:db8:10')
++        self.assertEqual(value, '2001:db8:10::dead:beef')
++        self.assertTrue(collision)
++
++    def test_route_prefix_normalization_accepts_legacy_replay_value(self):
++        self.assertEqual(
++            normalize_route_prefix('2001:db8:10:21', '63'),
++            '2001:0db8:0010:0020:0000:0000:0000:0000',
++        )
++
++    def test_route_thread_build_route_call_normalizes_prefix_argument(self):
++        call = RouteThread.build_route_call(
++            'up',
++            '/usr/sbin/dhcpy6d-add-route $prefix$/$length$ $router$ dmz',
++            '20010db8001000210000000000000000',
++            '63',
++            'fe800000000000000000000000000002',
++        )
++
++        self.assertEqual(
++            call,
++            '/usr/sbin/dhcpy6d-add-route '
++            '2001:0db8:0010:0020:0000:0000:0000:0000/63 '
++            'fe80:0000:0000:0000:0000:0000:0000:0002 dmz',
++        )
++
++    def test_manage_prefixes_routes_deconfigures_stale_active_route(self):
++        class _MockStore:
++            def __init__(self):
++                self.deactivated = []
++                self.removed = []
++
++            def release_free_prefixes(self, _now):
++                return None
++
++            def get_inactive_prefixes(self):
++                return []
++
++            def get_active_prefixes(self):
++                return ['20010db808388f000000000000000000']
++
++            def get_route(self, _prefix):
++                return '63', 'fe800000000000000000000000000002', 'default'
++
++            def get_prefix_record(self, _prefix):
++                # stale: configured class does not contain this prefix type anymore
++                return ('20010db808388f000000000000000000', '63', 'obsolete', 'default', 1)
++
++            def deactivate_prefix(self, prefix):
++                self.deactivated.append(prefix)
++
++            def remove_route(self, prefix):
++                self.removed.append(prefix)
++
++        original_store = route_module.volatile_store
++        mock_store = _MockStore()
++        route_module.volatile_store = mock_store
++        timer.time = 0
++        cfg.CLASSES['default'].CALL_DOWN = '/usr/sbin/dhcpy6d-del-route $prefix$/$length$ $router$'
++        while not route_queue.empty():
++            route_queue.get_nowait()
++        try:
++            manage_prefixes_routes()
++            self.assertEqual(
++                mock_store.deactivated,
++                ['20010db808388f000000000000000000'],
++            )
++            self.assertEqual(
++                mock_store.removed,
++                ['20010db808388f000000000000000000'],
++            )
++            self.assertFalse(route_queue.empty())
++            mode, _call, prefix, _length, _router = route_queue.get_nowait()
++            self.assertEqual(mode, 'down')
++            self.assertEqual(prefix, '20010db808388f000000000000000000')
++        finally:
++            route_module.volatile_store = original_store
++
++    def test_reuse_lease_refuses_unconfigured_prefix_with_zero_lifetimes(self):
++        class _MockLeaseStore:
++            @staticmethod
++            def check_prefix(_prefix, _length, _transaction):
++                return [('iserv', '20010db808388f000000000000000000', '63', 'obsolete', 'range', 'default', 0)]
++
++        original_store = reuse_lease_module.volatile_store
++        reuse_lease_module.volatile_store = _MockLeaseStore()
++        cfg.CLASSES['default'].ADVERTISE = ['prefixes']
++        cfg.CLASSES['default'].PREFIXES = []
++        cfg.CLASSES['default_eth0'] = cfg.CLASSES['default']
++        try:
++            client = Client()
++            transaction = MockPrefixTransaction()
++            reuse_lease_module.reuse_lease(client=client, client_config=None, transaction=transaction)
++            self.assertEqual(len(client.prefixes), 1)
++            self.assertEqual(client.prefixes[0].PREFIX.replace(':', ''), '20010db808388f000000000000000000')
++            self.assertEqual(client.prefixes[0].LENGTH, '63')
++            self.assertEqual(client.prefixes[0].PREFERRED_LIFETIME, 0)
++            self.assertEqual(client.prefixes[0].VALID_LIFETIME, 0)
++        finally:
++            reuse_lease_module.volatile_store = original_store
++
++    def test_reuse_lease_refuses_unconfigured_address_with_zero_lifetimes(self):
++        class _MockLeaseStore:
++            def __init__(self):
++                self.deactivated = []
++
++            @staticmethod
++            def check_lease(_address, _transaction):
++                return [('iserv', '20010db808388fa30000000000000002', 'obsolete', 'range', 'na', 'default', 0)]
++
++            def deactivate_lease(self, address):
++                self.deactivated.append(address)
++
++        mock_store = _MockLeaseStore()
++        original_store = reuse_lease_module.volatile_store
++        reuse_lease_module.volatile_store = mock_store
++        cfg.CLASSES['default'].ADVERTISE = ['addresses']
++        cfg.CLASSES['default'].ADDRESSES = []
++        cfg.CLASSES['default_eth0'] = cfg.CLASSES['default']
++        try:
++            client = Client()
++            transaction = MockAddressTransaction()
++            reuse_lease_module.reuse_lease(client=client, client_config=None, transaction=transaction)
++            self.assertEqual(len(client.addresses), 1)
++            self.assertEqual(client.addresses[0].ADDRESS.replace(':', ''), '20010db808388fa30000000000000002')
++            self.assertEqual(client.addresses[0].PREFERRED_LIFETIME, 0)
++            self.assertEqual(client.addresses[0].VALID_LIFETIME, 0)
++            self.assertEqual(mock_store.deactivated, ['20010db808388fa30000000000000002'])
++        finally:
++            reuse_lease_module.volatile_store = original_store
++
++    def test_reuse_lease_deactivates_fixed_address_removed_from_client_configuration(self):
++        class _MockLeaseStore:
++            def __init__(self):
++                self.deactivated = []
++
++            @staticmethod
++            def check_lease(_address, _transaction):
++                return [('iserv', '20010db808388fa30000000000000002', 'fixed', 'fixed', 'na', 'default', 0)]
++
++            def deactivate_lease(self, address):
++                self.deactivated.append(address)
++
++        mock_store = _MockLeaseStore()
++        original_store = reuse_lease_module.volatile_store
++        reuse_lease_module.volatile_store = mock_store
++        cfg.CLASSES['default'].ADVERTISE = ['addresses']
++        cfg.CLASSES['default'].ADDRESSES = []
++        cfg.CLASSES['default_eth0'] = cfg.CLASSES['default']
++        client_config = ClientConfig(
++            hostname='iserv',
++            client_class='default',
++            address='2001:db8:838:8fa3::3',
++        )
++        try:
++            client = Client()
++            transaction = MockAddressTransaction()
++            reuse_lease_module.reuse_lease(client=client, client_config=client_config, transaction=transaction)
++            addresses = {address.ADDRESS.replace(':', ''): address for address in client.addresses}
++            self.assertEqual(set(addresses), {
++                '20010db808388fa30000000000000002',
++                '20010db808388fa30000000000000003',
++            })
++            self.assertEqual(addresses['20010db808388fa30000000000000002'].PREFERRED_LIFETIME, 0)
++            self.assertEqual(addresses['20010db808388fa30000000000000002'].VALID_LIFETIME, 0)
++            self.assertEqual(mock_store.deactivated, ['20010db808388fa30000000000000002'])
++        finally:
++            reuse_lease_module.volatile_store = original_store
++
++    def test_reuse_lease_restores_fixed_address_missing_from_renew(self):
++        class _MockLeaseStore:
++            @staticmethod
++            def check_lease(_address, _transaction):
++                return [('iserv', '20010db808388fa30000000000000002', 'fixed', 'fixed', 'na', 'default', 0)]
++
++            @staticmethod
++            def deactivate_lease(_address):
++                raise AssertionError('configured fixed lease must remain active')
++
++        original_store = reuse_lease_module.volatile_store
++        reuse_lease_module.volatile_store = _MockLeaseStore()
++        cfg.CLASSES['default'].ADVERTISE = ['addresses']
++        cfg.CLASSES['default'].ADDRESSES = []
++        cfg.CLASSES['default_eth0'] = cfg.CLASSES['default']
++        client_config = ClientConfig(
++            hostname='iserv',
++            client_class='default',
++            address=['2001:db8:838:8fa3::2', '2001:db8:838:8fa3::3'],
++        )
++        try:
++            client = Client()
++            transaction = MockAddressTransaction()
++            transaction.addresses = ['20010db808388fa30000000000000002']
++            reuse_lease_module.reuse_lease(client=client, client_config=client_config, transaction=transaction)
++            self.assertEqual(
++                {address.ADDRESS.replace(':', '') for address in client.addresses},
++                {
++                    '20010db808388fa30000000000000002',
++                    '20010db808388fa30000000000000003',
++                },
++            )
++        finally:
++            reuse_lease_module.volatile_store = original_store
++
++
++if __name__ == "__main__":
++    unittest.main()
++
++class PrefixOptionSubstitutionTest(unittest.TestCase):
++    def test_expands_global_and_class_literal_ipv6_options(self):
++        from dhcpy6d.config import Class, inject_dynamic_prefix_options
++
++        class Config:
++            ADDRESS = '$prefix$19::1'
++            NAMESERVER = '$prefix$19::53 fd00::53'
++            NTP_SERVER = '$prefix$19::123 time.example.test'
++            SNTP_SERVERS = '$prefix$19::124'
++            CLASSES = {'default': Class('default')}
++
++        Config.CLASSES['default'].NAMESERVER = '$prefix$19::54'
++        Config.CLASSES['default'].NTP_SERVER = '$prefix$19::125 ntp.example.test'
++        inject_dynamic_prefix_options(Config, '2001:db8:100:20')
++
++        self.assertEqual(Config.ADDRESS, '2001:db8:100:2019::1')
++        self.assertEqual(Config.NAMESERVER, '2001:db8:100:2019::53 fd00::53')
++        self.assertEqual(Config.NTP_SERVER, '2001:db8:100:2019::123 time.example.test')
++        self.assertEqual(Config.SNTP_SERVERS, '2001:db8:100:2019::124')
++        self.assertEqual(Config.CLASSES['default'].NAMESERVER, '2001:db8:100:2019::54')
++        self.assertEqual(Config.CLASSES['default'].NTP_SERVER,
++                         '2001:db8:100:2019::125 ntp.example.test')
++
++class PrefixOptionSubstitutionTest(unittest.TestCase):
++    def test_expands_global_and_class_literal_ipv6_options(self):
++        from dhcpy6d.config import BootFile, Class, inject_dynamic_prefix_options
++
++        class Config:
++            ADDRESS = '$prefix$19::1'
++            NAMESERVER = '$prefix$19::53 fd00::53'
++            NTP_SERVER = '$prefix$19::123 time.example.test'
++            SNTP_SERVERS = '$prefix$19::124'
++            DNS_UPDATE_NAMESERVER = '$prefix$19::5353'
++            CLASSES = {'default': Class('default')}
++            BOOTFILES = {'pxe': BootFile('pxe')}
++
++        Config.BOOTFILES['pxe'].BOOTFILE_URL = 'tftp://[$prefix$19::1]/default.ipxe'
++        Config.CLASSES['default'].NAMESERVER = '$prefix$19::54'
++        Config.CLASSES['default'].NTP_SERVER = '$prefix$19::125 ntp.example.test'
++        inject_dynamic_prefix_options(Config, '2001:db8:100:20')
++
++        self.assertEqual(Config.ADDRESS, '2001:db8:100:2019::1')
++        self.assertEqual(Config.NAMESERVER, '2001:db8:100:2019::53 fd00::53')
++        self.assertEqual(Config.NTP_SERVER, '2001:db8:100:2019::123 time.example.test')
++        self.assertEqual(Config.SNTP_SERVERS, '2001:db8:100:2019::124')
++        self.assertEqual(Config.DNS_UPDATE_NAMESERVER, '2001:db8:100:2019::5353')
++        self.assertEqual(Config.BOOTFILES['pxe'].BOOTFILE_URL, 'tftp://[2001:db8:100:2019::1]/default.ipxe')
++        self.assertEqual(Config.CLASSES['default'].NAMESERVER, '2001:db8:100:2019::54')
++        self.assertEqual(Config.CLASSES['default'].NTP_SERVER,
++                         '2001:db8:100:2019::125 ntp.example.test')
++
++    def test_accepts_unconfigured_optional_address_options(self):
++        from dhcpy6d.config import BootFile, Class, inject_dynamic_prefix_options
++
++        class Config:
++            ADDRESS = '$prefix$19::1'
++            NAMESERVER = ''
++            NTP_SERVER = ''
++            SNTP_SERVERS = ''
++            DNS_UPDATE_NAMESERVER = '::1'
++            CLASSES = {'default': Class('default')}
++            BOOTFILES = {'pxe': BootFile('pxe')}
++
++        inject_dynamic_prefix_options(Config, '2001:db8:100:20')
++
++        self.assertEqual(Config.ADDRESS, '2001:db8:100:2019::1')
++        self.assertEqual(Config.NAMESERVER, '')
++        self.assertEqual(Config.NTP_SERVER, '')
++        self.assertEqual(Config.SNTP_SERVERS, '')
++        self.assertEqual(Config.CLASSES['default'].NAMESERVER, '')
++        self.assertEqual(Config.CLASSES['default'].NTP_SERVER, '')
+--- /dev/null
++++ dhcpy6d-1.7.0/tests/test_python311_compat.py
+@@ -0,0 +1,137 @@
++import os
++import sys
++import tempfile
++import types
++import unittest
++from unittest import mock
++
++
++_TEMP_VOLATILE_DB = tempfile.NamedTemporaryFile(suffix='.sqlite', delete=False)
++_TEMP_VOLATILE_DB.close()
++_TEMP_CONFIG = tempfile.NamedTemporaryFile('w', suffix='.conf', delete=False)
++_TEMP_CONFIG.write('[dhcpy6d]\n')
++_TEMP_CONFIG.write('interface = eth0\n')
++_TEMP_CONFIG.write('ignore_interface = yes\n')
++_TEMP_CONFIG.write('store_config = none\n')
++_TEMP_CONFIG.write(f'store_sqlite_volatile = {_TEMP_VOLATILE_DB.name}\n')
++_TEMP_CONFIG.flush()
++_TEMP_CONFIG.close()
++
++_ORIGINAL_ARGV = list(sys.argv)
++sys.argv = [sys.argv[0], '--config', _TEMP_CONFIG.name]
++
++_dns = types.ModuleType('dns')
++_dns_resolver = types.ModuleType('dns.resolver')
++_dns_tsigkeyring = types.ModuleType('dns.tsigkeyring')
++
++
++class _DummyResolver:
++    def __init__(self):
++        self.nameservers = []
++
++
++class _DummyDnsError(Exception):
++    pass
++
++
++_dns_resolver.Resolver = _DummyResolver
++_dns_resolver.NoAnswer = _DummyDnsError
++_dns_resolver.NoNameservers = _DummyDnsError
++_dns_tsigkeyring.from_text = lambda *_args, **_kwargs: {}
++_dns.resolver = _dns_resolver
++_dns.tsigkeyring = _dns_tsigkeyring
++sys.modules.setdefault('dns', _dns)
++sys.modules.setdefault('dns.resolver', _dns_resolver)
++sys.modules.setdefault('dns.tsigkeyring', _dns_tsigkeyring)
++
++_ORIGINAL_CHOWN = os.chown
++os.chown = lambda *_args, **_kwargs: None
++
++import dhcpy6d
++from dhcpy6d.client import parse_pattern
++from dhcpy6d.config import Address, cfg
++from dhcpy6d.options import OPTIONS
++from dhcpy6d.storage.store import Store
++
++os.chown = _ORIGINAL_CHOWN
++sys.argv = _ORIGINAL_ARGV
++
++
++def tearDownModule():
++    try:
++        from dhcpy6d.storage import close_stores
++        close_stores()
++    finally:
++        for path in (_TEMP_CONFIG.name, _TEMP_VOLATILE_DB.name):
++            try:
++                os.unlink(path)
++            except FileNotFoundError:
++                pass
++
++
++class ConfigurationDefaultsTest(unittest.TestCase):
++    def test_default_cleaning_interval_is_accepted_and_converted_to_int(self):
++        self.assertEqual(cfg.CLEANING_INTERVAL, 10)
++        self.assertIsInstance(cfg.CLEANING_INTERVAL, int)
++
++
++class LazyExportTest(unittest.TestCase):
++    def test_lazy_export_cache_does_not_call_shadowed_globals_name(self):
++        fake_module = types.ModuleType('dhcpy6d._compat_fake')
++        fake_module.value = object()
++        sys.modules[fake_module.__name__] = fake_module
++
++        original_exports = dict(dhcpy6d._LAZY_EXPORTS)
++        original_globals_attr = getattr(dhcpy6d, 'globals', None)
++        had_globals_attr = hasattr(dhcpy6d, 'globals')
++        try:
++            dhcpy6d._LAZY_EXPORTS['compat_value'] = ('._compat_fake', 'value')
++            dhcpy6d.globals = types.ModuleType('dhcpy6d.globals')
++
++            self.assertIs(dhcpy6d.__getattr__('compat_value'), fake_module.value)
++            self.assertIs(dhcpy6d.compat_value, fake_module.value)
++        finally:
++            dhcpy6d._LAZY_EXPORTS.clear()
++            dhcpy6d._LAZY_EXPORTS.update(original_exports)
++            sys.modules.pop(fake_module.__name__, None)
++            if hasattr(dhcpy6d, 'compat_value'):
++                delattr(dhcpy6d, 'compat_value')
++            if had_globals_attr:
++                dhcpy6d.globals = original_globals_attr
++            elif hasattr(dhcpy6d, 'globals'):
++                delattr(dhcpy6d, 'globals')
++
++
++class OptionImportTest(unittest.TestCase):
++    def test_mac_dependent_options_load_without_package_lazy_export(self):
++        for option_number in (3, 4, 25):
++            self.assertIn(option_number, OPTIONS)
++
++
++class RandomAddressPatternTest(unittest.TestCase):
++    def test_random64_uses_full_16_hex_digits_on_python3(self):
++        address = Address(category='random', pattern='2001:db8::$random64$')
++        transaction = types.SimpleNamespace(duid='duid', mac='00:11:22:33:44:55')
++        volatile_store = types.SimpleNamespace(
++            check_advertised_lease=lambda *_args, **_kwargs: None,
++        )
++
++        with mock.patch.object(parse_pattern, 'volatile_store', volatile_store):
++            with mock.patch.object(parse_pattern.random, 'getrandbits', return_value=0x123456789abcdef0):
++                parsed = parse_pattern.parse_pattern_address(address, None, transaction)
++
++        self.assertEqual(parsed, '20010db800000000123456789abcdef0')
++
++
++class StoreCloseTest(unittest.TestCase):
++    def test_close_closes_cursor_and_connection(self):
++        store = Store(None, None)
++        store.connected = True
++        store.cursor = mock.Mock()
++        store.connection = mock.Mock()
++
++        store.close()
++
++        store.cursor.close.assert_called_once_with()
++        store.connection.close.assert_called_once_with()
++        self.assertFalse(store.connected)
+--- /dev/null
++++ dhcpy6d-1.7.0/tests/test_storage.py
+@@ -0,0 +1,214 @@
++import os
++import queue
++import sys
++import tempfile
++import time
++import types
++import unittest
++
++
++_TEMP_VOLATILE_DB = tempfile.NamedTemporaryFile(suffix='.sqlite', delete=False)
++_TEMP_VOLATILE_DB.close()
++_TEMP_CONFIG = tempfile.NamedTemporaryFile('w', suffix='.conf', delete=False)
++_TEMP_CONFIG.write('[dhcpy6d]\n')
++_TEMP_CONFIG.write('interface = eth0\n')
++_TEMP_CONFIG.write('ignore_interface = yes\n')
++_TEMP_CONFIG.write('store_config = none\n')
++_TEMP_CONFIG.write(f'store_sqlite_volatile = {_TEMP_VOLATILE_DB.name}\n')
++_TEMP_CONFIG.flush()
++_TEMP_CONFIG.close()
++
++_ORIGINAL_ARGV = list(sys.argv)
++sys.argv = [sys.argv[0], '--config', _TEMP_CONFIG.name]
++
++_dns = types.ModuleType('dns')
++_dns_resolver = types.ModuleType('dns.resolver')
++_dns_tsigkeyring = types.ModuleType('dns.tsigkeyring')
++
++
++class _DummyResolver:
++    def __init__(self):
++        self.nameservers = []
++
++
++class _DummyDnsError(Exception):
++    pass
++
++
++_dns_resolver.Resolver = _DummyResolver
++_dns_resolver.NoAnswer = _DummyDnsError
++_dns_resolver.NoNameservers = _DummyDnsError
++_dns_tsigkeyring.from_text = lambda *_args, **_kwargs: {}
++_dns.resolver = _dns_resolver
++_dns.tsigkeyring = _dns_tsigkeyring
++sys.modules.setdefault('dns', _dns)
++sys.modules.setdefault('dns.resolver', _dns_resolver)
++sys.modules.setdefault('dns.tsigkeyring', _dns_tsigkeyring)
++
++_ORIGINAL_CHOWN = os.chown
++os.chown = lambda *_args, **_kwargs: None
++
++import dhcpy6d.storage as storage
++from dhcpy6d.storage.sqlite import SQLite
++from dhcpy6d.storage.store import Store
++from dhcpy6d.storage import QueryQueue
++
++os.chown = _ORIGINAL_CHOWN
++sys.argv = _ORIGINAL_ARGV
++
++
++def tearDownModule():
++    try:
++        from dhcpy6d.storage import close_stores
++        close_stores()
++    finally:
++        for path in (_TEMP_CONFIG.name, _TEMP_VOLATILE_DB.name):
++            try:
++                os.unlink(path)
++            except FileNotFoundError:
++                pass
++
++
++class VolatileStoreBatchTest(unittest.TestCase):
++    @staticmethod
++    def transaction():
++        return types.SimpleNamespace(
++            client=types.SimpleNamespace(
++                addresses=[
++                    types.SimpleNamespace(
++                        ADDRESS='20010db8000000000000000000000001',
++                        PREFERRED_LIFETIME=5400, VALID_LIFETIME=7200,
++                        TYPE='fixed', CATEGORY='fixed', IA_TYPE='na',
++                    ),
++                    types.SimpleNamespace(
++                        ADDRESS='20010db8000000000000000000000002',
++                        PREFERRED_LIFETIME=5400, VALID_LIFETIME=7200,
++                        TYPE='fixed', CATEGORY='fixed', IA_TYPE='na',
++                    ),
++                ],
++                prefixes=[], hostname='paperless', client_class='default_eth0',
++            ),
++            last_message_received_type=3, mac='02:00:c0:a8:00:02',
++            duid='0001000130750a150200c0a80002', iaid='c0a80002',
++        )
++
++    def test_store_batches_address_writes(self):
++        store = object.__new__(Store)
++        batches = []
++        store.table_leases = 'leases'
++        store.table_prefixes = 'prefixes'
++        store.query = lambda _query: []
++        store.query_batch = lambda queries: batches.append(tuple(queries))
++        Store.store(store, self.transaction(), now=100)
++
++        self.assertEqual(len(batches), 1)
++        self.assertEqual(len(batches[0]), 2)
++        self.assertTrue(all(query.startswith('INSERT INTO leases') for query in batches[0]))
++
++    def test_store_queues_write_batch_without_waiting(self):
++        store = object.__new__(Store)
++        batches = []
++        store.table_leases = 'leases'
++        store.table_prefixes = 'prefixes'
++        store.query = lambda _query: []
++        store.query_batch = lambda _queries: self.fail('synchronous write used')
++        store.query_batch_async = lambda queries, callback=None: batches.append(tuple(queries))
++
++        Store.store(store, self.transaction(), now=100, wait_for_writes=False)
++
++        self.assertEqual(len(batches), 1)
++        self.assertEqual(len(batches[0]), 2)
++
++    def test_async_advertised_lease_is_reserved_before_sqlite_commit(self):
++        store = object.__new__(Store)
++        store.table_leases = 'leases'
++        store.table_prefixes = 'prefixes'
++        store.query = lambda _query: []
++        store.query_batch_async = lambda _queries, callback=None: None
++        transaction = self.transaction()
++        transaction.last_message_received_type = 1
++        transaction.client.addresses[0].CATEGORY = 'random'
++        transaction.client.addresses[0].TYPE = 'dynamic'
++
++        Store.store(store, transaction, now=100, wait_for_writes=False)
++
++        self.assertEqual(
++            Store.check_advertised_lease(store, transaction, category='random', atype='dynamic'),
++            '20010db8000000000000000000000001',
++        )
++
++    def test_async_query_does_not_create_an_answer(self):
++        query_queue = queue.Queue()
++        answer_queue = queue.Queue()
++        store = object.__new__(Store)
++        store.query_queue = query_queue
++        store.answer_queue = answer_queue
++        calls = []
++        worker_store = types.SimpleNamespace(
++            db_query=lambda query: calls.append(query) or [],
++        )
++        worker = QueryQueue(store_type=worker_store,
++                            query_queue=query_queue,
++                            answer_queue=answer_queue)
++        worker.start()
++
++        store.query_async('UPDATE leases SET active = 1')
++
++        deadline = time.monotonic() + 1
++        while not calls and time.monotonic() < deadline:
++            time.sleep(0.01)
++        self.assertEqual(calls, ['UPDATE leases SET active = 1'])
++        self.assertTrue(answer_queue.empty())
++
++    def test_store_async_queues_complete_lease_work(self):
++        store = object.__new__(Store)
++        store.query_queue = queue.Queue()
++        transaction = self.transaction()
++
++        Store.store_async(store, transaction, now=100)
++
++        queued = store.query_queue.get_nowait()
++        self.assertIsInstance(queued, storage.AsyncStore)
++        self.assertIs(queued.transaction, transaction)
++
++    def test_async_store_runs_without_creating_an_answer(self):
++        query_queue = queue.Queue()
++        answer_queue = queue.Queue()
++        calls = []
++        transaction = self.transaction()
++        worker_store = types.SimpleNamespace(
++            db_query=lambda query: calls.append(('query', query)) or [],
++            db_query_batch=lambda queries: calls.append(('batch', queries)) or [],
++            store=lambda transaction, now, query_function, batch_function:
++                calls.append(('store', transaction, now, query_function, batch_function)) or True,
++        )
++        worker = QueryQueue(store_type=worker_store,
++                            query_queue=query_queue,
++                            answer_queue=answer_queue)
++        worker.start()
++
++        query_queue.put(storage.AsyncStore(transaction, 100))
++
++        deadline = time.monotonic() + 1
++        while not calls and time.monotonic() < deadline:
++            time.sleep(0.01)
++        self.assertEqual(calls[0][0:3], ('store', transaction, 100))
++        self.assertTrue(answer_queue.empty())
++
++    def test_sqlite_batch_rolls_back_all_writes_on_integrity_error(self):
++        import sqlite3
++
++        store = object.__new__(SQLite)
++        store.db_module = sqlite3
++        store.connection = sqlite3.connect(':memory:')
++        store.cursor = store.connection.cursor()
++        store.db_connect = lambda: False
++        store.cursor.execute('CREATE TABLE leases (address TEXT PRIMARY KEY)')
++
++        result = store.db_query((
++            "INSERT INTO leases VALUES ('20010db8000000000000000000000001')",
++            "INSERT INTO leases VALUES ('20010db8000000000000000000000001')",
++        ))
++
++        self.assertEqual(result, 'INSERT_ERROR')
++        self.assertEqual(store.cursor.execute('SELECT * FROM leases').fetchall(), [])
