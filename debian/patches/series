@@ -1,3 +1,4 @@
 stsbl-nmu-changes
 stsbl-pid-supervision.patch
 stsbl-pidfile-module.patch
+stsbl-nmu3-fixed-prefix-renew.patch

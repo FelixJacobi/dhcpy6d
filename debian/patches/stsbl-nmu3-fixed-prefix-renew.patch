@@ -1,0 +1,145 @@
+Description: <short summary of the patch>
+ TODO: Put a short summary on the line above and replace this paragraph
+ with a longer explanation of this change. Complete the meta-information
+ with other relevant fields (see below for details). To make it easier, the
+ information below has been extracted from the changelog. Adjust it or drop
+ it.
+ .
+ dhcpy6d (1.7.0-1+stsblnmu3) UNRELEASED; urgency=medium
+ .
+   * Fix renewal of fixed delegated prefixes with empty IA_PD requests.
+Author: Felix Jacobi <felix.jacobi@iserv.eu>
+
+---
+The information above should follow the Patch Tagging Guidelines, please
+checkout https://dep.debian.net/deps/dep3/ to learn about the format. Here
+are templates for supplementary fields that you might want to add:
+
+Origin: (upstream|backport|vendor|other), (<patch-url>|commit:<commit-id>)
+Bug: <upstream-bugtracker-url>
+Bug-Debian: https://bugs.debian.org/<bugnumber>
+Bug-Ubuntu: https://launchpad.net/bugs/<bugnumber>
+Forwarded: (no|not-needed|<patch-forwarded-url>)
+Applied-Upstream: <version>, (<commit-url>|commit:<commid-id>)
+Reviewed-By: <name and email of someone who approved/reviewed the patch>
+Last-Update: 2026-08-27
+
+Index: dhcpy6d-1.7.0/dhcpy6d/client/reuse_lease.py
+===================================================================
+--- dhcpy6d-1.7.0.orig/dhcpy6d/client/reuse_lease.py
++++ dhcpy6d-1.7.0/dhcpy6d/client/reuse_lease.py
+@@ -268,6 +268,20 @@ def reuse_lease(client=None, client_conf
+                             # continue to advertise it as valid. It will be refused later
+                             # with preferred/valid lifetime 0 via transaction prefix diff.
+ 
++        if client_config is not None and client_config.PREFIX is not None and \
++                transaction.interface in cfg.CLASSES[client.client_class].INTERFACE:
++            active_prefixes = {decompress_prefix(prefix.PREFIX, prefix.LENGTH)
++                               for prefix in client.prefixes}
++            for prefix in client_config.PREFIX:
++                configured_prefix = decompress_prefix(prefix['address'], prefix['length'])
++                if configured_prefix not in active_prefixes:
++                    client.prefixes.append(Prefix(prefix=prefix['address'],
++                                                  length=prefix['length'],
++                                                  preferred_lifetime=cfg.PREFERRED_LIFETIME,
++                                                  valid_lifetime=cfg.VALID_LIFETIME,
++                                                  route_link_local=False))
++                    active_prefixes.add(configured_prefix)
++
+         # important indent here, has to match for...prefixes-loop!
+         # look for prefixes in transaction that are invalid and add them
+         # to client prefixes with flag invalid and a RFC-compliant lifetime of 0
+Index: dhcpy6d-1.7.0/tests/test_fixed_prefix_renew.py
+===================================================================
+--- /dev/null
++++ dhcpy6d-1.7.0/tests/test_fixed_prefix_renew.py
+@@ -0,0 +1,71 @@
++import os
++import sys
++import tempfile
++import types
++import unittest
++
++
++volatile_db = tempfile.NamedTemporaryFile(delete=False)
++volatile_db.close()
++config = tempfile.NamedTemporaryFile("w", delete=False)
++config.write(
++    "[dhcpy6d]\ninterface = eth0\nignore_interface = yes\n"
++    "store_config = none\nstore_sqlite_volatile = {}\n".format(volatile_db.name)
++)
++config.write("cleaning_interval = 10\n")
++config.close()
++sys.argv = [sys.argv[0], "--config", config.name]
++
++dns = types.ModuleType("dns")
++for name in ("query", "reversename", "resolver", "update", "tsigkeyring"):
++    module = types.ModuleType("dns." + name)
++    setattr(dns, name, module)
++    sys.modules["dns." + name] = module
++sys.modules["dns"] = dns
++dns.resolver.NoAnswer = type("NoAnswer", (Exception,), {})
++dns.resolver.NoNameservers = type("NoNameservers", (Exception,), {})
++dns.resolver.Resolver = type("Resolver", (), {"__init__": lambda self: None})
++
++original_chown = os.chown
++os.chown = lambda *_args, **_kwargs: None
++from dhcpy6d.client import Client
++from dhcpy6d.client.reuse_lease import reuse_lease
++from dhcpy6d.config import cfg
++os.chown = original_chown
++
++
++class TestFixedPrefixRenew(unittest.TestCase):
++    def test_restores_fixed_prefix_when_renew_contains_empty_ia_pd(self):
++        class ClientConfig:
++            CLASS = "fixed_eth0"
++            HOSTNAME = "iserv"
++            PREFIX = [{"address": "2001:db8:838:8f00::", "length": "63"}]
++
++        class Class:
++            INTERFACE = ["eth0"]
++            ANSWER = "normal"
++            ADVERTISE = ["prefixes"]
++            PREFIXES = []
++
++        class Transaction:
++            interface = "eth0"
++            ia_options = [3, 25]
++            addresses = ["20010db808388fa3000000000000000002"]
++            prefixes = []
++
++        old_classes = cfg.CLASSES
++        cfg.CLASSES = {"fixed_eth0": Class()}
++        try:
++            client = Client()
++            client.client_class = "fixed_eth0"
++            reuse_lease(client=client, client_config=ClientConfig(), transaction=Transaction())
++            self.assertEqual(
++                [(prefix.PREFIX, prefix.LENGTH) for prefix in client.prefixes],
++                [("2001:db8:838:8f00::", "63")],
++            )
++        finally:
++            cfg.CLASSES = old_classes
++
++
++if __name__ == "__main__":
++    unittest.main()
+Index: dhcpy6d-1.7.0/tests/test_pid_file.py
+===================================================================
+--- dhcpy6d-1.7.0.orig/tests/test_pid_file.py
++++ dhcpy6d-1.7.0/tests/test_pid_file.py
+@@ -15,3 +15,4 @@ class PidFileTest(unittest.TestCase):
+ 
+     def test_empty_path_is_ignored(self):
+         self.assertIsNone(write_pid_file(None))
++
+Index: dhcpy6d-1.7.0/tests/test_prefix_substitution.py
+===================================================================
+--- dhcpy6d-1.7.0.orig/tests/test_prefix_substitution.py
++++ dhcpy6d-1.7.0/tests/test_prefix_substitution.py
+@@ -547,4 +547,3 @@ class PrefixOptionSubstitutionTest(unitt
+         self.assertEqual(Config.SNTP_SERVERS, '')
+         self.assertEqual(Config.CLASSES['default'].NAMESERVER, '')
+         self.assertEqual(Config.CLASSES['default'].NTP_SERVER, '')
+-
