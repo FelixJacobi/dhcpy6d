@@ -4,12 +4,9 @@ Origin: other, commit:09b73454ddcde68ffe707f51205e8fdb177dd69f
 Forwarded: https://github.com/HenriWahl/dhcpy6d/pull/78
 Last-Update: 2026-10-23
 
----
-diff --git a/dhcpy6d/client/reuse_lease.py b/dhcpy6d/client/reuse_lease.py
-index 18f59b0..0885b1c 100644
 --- a/dhcpy6d/client/reuse_lease.py
 +++ b/dhcpy6d/client/reuse_lease.py
-@@ -279,7 +279,7 @@ def reuse_lease(client=None, client_config=None, transaction=None):
+@@ -279,7 +279,7 @@
                                                    length=prefix['length'],
                                                    preferred_lifetime=cfg.PREFERRED_LIFETIME,
                                                    valid_lifetime=cfg.VALID_LIFETIME,
@@ -18,16 +15,11 @@ index 18f59b0..0885b1c 100644
                      active_prefixes.add(configured_prefix)
  
          # important indent here, has to match for...prefixes-loop!
-diff --git a/tests/test_fixed_prefix_renew.py b/tests/test_fixed_prefix_renew.py
-index f190111..110d35a 100644
 --- a/tests/test_fixed_prefix_renew.py
 +++ b/tests/test_fixed_prefix_renew.py
-@@ -12,26 +12,37 @@ config.write(
-     "[dhcpy6d]\ninterface = eth0\nignore_interface = yes\n"
-     "store_config = none\nstore_sqlite_volatile = {}\n".format(volatile_db.name)
+@@ -14,24 +14,35 @@
  )
--config.write("cleaning_interval = 3600\n")
-+config.write("cleaning_interval = 10\n")
+ config.write("cleaning_interval = 10\n")
  config.close()
 +original_argv = sys.argv
  sys.argv = [sys.argv[0], "--config", config.name]
@@ -74,7 +66,7 @@ index f190111..110d35a 100644
  
  
  class TestFixedPrefixRenew(unittest.TestCase):
-@@ -40,6 +51,7 @@ class TestFixedPrefixRenew(unittest.TestCase):
+@@ -40,6 +51,7 @@
              CLASS = "fixed_eth0"
              HOSTNAME = "iserv"
              PREFIX = [{"address": "2001:db8:838:8f00::", "length": "63"}]
@@ -82,7 +74,7 @@ index f190111..110d35a 100644
  
          class Class:
              INTERFACE = ["eth0"]
-@@ -50,7 +62,7 @@ class TestFixedPrefixRenew(unittest.TestCase):
+@@ -50,7 +62,7 @@
          class Transaction:
              interface = "eth0"
              ia_options = [3, 25]
@@ -91,7 +83,7 @@ index f190111..110d35a 100644
              prefixes = []
  
          old_classes = cfg.CLASSES
-@@ -63,6 +75,7 @@ class TestFixedPrefixRenew(unittest.TestCase):
+@@ -63,6 +75,7 @@
                  [(prefix.PREFIX, prefix.LENGTH) for prefix in client.prefixes],
                  [("2001:db8:838:8f00::", "63")],
              )
