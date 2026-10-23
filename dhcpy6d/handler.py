@@ -315,10 +315,10 @@ class RequestHandler(socketserver.DatagramRequestHandler):
                                                         [CONST.OPTION.PREFERENCE] +
                                                         transaction.options_request)
                                     # store leases for addresses
+                                    volatile_store.store_async(deepcopy(transaction), timer.time)
                                     # renew delegated-prefix routes after a successful lease refresh
                                     if CONST.OPTION.IA_PD in transaction.ia_options:
                                         modify_route(transaction, 'up')
-                                    volatile_store.store_async(deepcopy(transaction), timer.time)
                                     if cfg.DNS_UPDATE:
                                         dns_update(transaction)
 
@@ -331,10 +331,10 @@ class RequestHandler(socketserver.DatagramRequestHandler):
                                                         [CONST.OPTION.PREFERENCE] +
                                                         transaction.options_request)
                                     # store leases for addresses
+                                    volatile_store.store_async(deepcopy(transaction), timer.time)
                                     # rebind delegated-prefix routes after a successful lease refresh
                                     if CONST.OPTION.IA_PD in transaction.ia_options:
                                         modify_route(transaction, 'up')
-                                    volatile_store.store_async(deepcopy(transaction), timer.time)
 
                                 # RELEASE
                                 # if last request was a RELEASE (type 8) send a REPLY (type 7) back
