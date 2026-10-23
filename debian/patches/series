@@ -2,3 +2,4 @@ stsbl-nmu-changes
 stsbl-pid-supervision.patch
 stsbl-pidfile-module.patch
 stsbl-nmu3-fixed-prefix-renew.patch
+stsbl-nmu4-renew-route-hook.patch

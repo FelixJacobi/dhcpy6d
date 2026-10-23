@@ -1,3 +1,9 @@
+dhcpy6d (1.7.0-1+stsblnmu4) UNRELEASED; urgency=medium
+
+  * Restore delegated-prefix route hooks after RENEW and REBIND replies.
+
+ -- Felix Jacobi <felix.jacobi@iserv.eu>  Fri, 23 Oct 2026 16:28:00 +0200
+
 dhcpy6d (1.7.0-1+stsblnmu3) UNRELEASED; urgency=medium
 
   * Fix renewal of fixed delegated prefixes with empty IA_PD requests.
