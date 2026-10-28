@@ -340,8 +340,8 @@ class Interoperability(unittest.TestCase):
         if pd:
             event = lab.packet(7, predicate=lambda e: bool(resources(e, 25)))
             self.assertTrue(all(ipaddress.IPv6Network(p).subnet_of(ipaddress.IPv6Network('2001:db8:100::/48')) and valid > 0 for p, valid in resources(event, 25)))
-            self.assertTrue(lab.rows('prefixes'))
-        self.assertTrue(lab.rows('leases'))
+            lab.wait(lambda: lab.rows('prefixes'), description='delegated prefix committed to lease database')
+        lab.wait(lambda: lab.rows('leases'), description='address committed to lease database')
         return lab, event
 
     def test_address_and_options(self):
@@ -497,7 +497,7 @@ class Interoperability(unittest.TestCase):
         lab.write_config(t1=120, t2=180, lifetime=240)
         lab.start_server()
         lab.start_client()
-        initial = lab.packet(7, predicate=lambda e: bool(resources(e, 25)))
+        initial = lab.packet(7, predicate=lambda e: bool(resources(e, 25)) and 11 in dict(tlvs(inner(e)[4:])))
         prefix = resources(initial, 25)[0][0]
         lab.wait(lambda: prefix in command('ip', '-6', 'route', ns='server').stdout, description='initial delegated route')
         command('ip', '-6', 'route', 'del', prefix, ns='server')

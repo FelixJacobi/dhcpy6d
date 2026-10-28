@@ -67,7 +67,7 @@ class TestReconfigureStartup(unittest.TestCase):
     def test_startup_triggers_after_privilege_drop_and_skips_missing_prefix(self):
         # Load the real entry point while isolating every OS/network side effect.
         with patch.dict('sys.modules', {'distro': SimpleNamespace(id=lambda: 'test')}):
-            spec = importlib.util.spec_from_file_location('reconfigure_main_test', Path(__file__).parents[1] / 'main.py')
+            spec = importlib.util.spec_from_file_location('reconfigure_main_test', next(parent / 'main.py' for parent in Path(__file__).resolve().parents if (parent / 'main.py').is_file()))
             main = importlib.util.module_from_spec(spec)
             spec.loader.exec_module(main)
         for prefix, enabled, expected in [('20010db8', True, True), ('', True, False), ('20010db8', False, False)]:

@@ -65,6 +65,12 @@ class SQLite(Store):
             sys.stdout.flush()
             return None
 
+    def create_tables(self):
+        # The initial schema-version INSERT must not leave a transaction open
+        # when the asynchronous lease worker starts its first explicit batch.
+        super().create_tables()
+        self.connection.commit()
+
     def db_query(self, query):
         """
         execute query on DB

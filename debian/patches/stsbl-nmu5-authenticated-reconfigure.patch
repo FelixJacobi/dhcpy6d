@@ -1,0 +1,2112 @@
+Description: Authenticated DHCPv6 Reconfigure and client interoperability coverage
+Author: Felix Jacobi <felix.jacobi@iserv.eu>
+Origin: other, upstream PR 82 and NMU integration fixes
+Forwarded: https://github.com/HenriWahl/dhcpy6d/pull/82
+Last-Update: 2026-10-28
+
+--- /dev/null
++++ b/.github/workflows/e2e.yml
+@@ -0,0 +1,64 @@
++name: DHCPv6 interoperability
++
++on:
++  pull_request:
++  push:
++    branches: ['**']
++  workflow_dispatch:
++
++permissions:
++  contents: read
++
++jobs:
++  clients:
++    name: DHCPv6 / ${{ matrix.client }}
++    runs-on: ubuntu-24.04
++    timeout-minutes: 15
++    strategy:
++      fail-fast: false
++      matrix:
++        client: [kea, dhclient, dhcpcd, networkd]
++    steps:
++      - uses: actions/checkout@v4
++      - name: Build isolated test image
++        run: docker build -t dhcpy6d-e2e:local -f tests/e2e/Dockerfile .
++      - name: Run real client and relay tests
++        env:
++          E2E_SKIP_BUILD: '1'
++        run: scripts/test-e2e.sh "${{ matrix.client }}"
++      - name: Upload packet captures, logs, versions and JUnit results
++        if: always()
++        uses: actions/upload-artifact@v4
++        with:
++          name: dhcpv6-${{ matrix.client }}
++          path: e2e-artifacts/
++          if-no-files-found: error
++          retention-days: 14
++
++  packaging:
++    name: Package installation
++    runs-on: ubuntu-24.04
++    timeout-minutes: 15
++    steps:
++      - uses: actions/checkout@v4
++      - name: Install Debian build dependencies
++        run: |
++          sudo apt-get update
++          sudo apt-get install -y debhelper dh-python fakeroot python3-all python3-setuptools python3-docutils
++      - name: Build Debian package and manual
++        # Git checkouts already contain applied downstream patches. Test the
++        # checked-out binary without trying to reapply a quilt source series.
++        run: |
++          debian/rules clean
++          debian/rules build
++          fakeroot debian/rules binary
++      - name: Build isolated installation-check image
++        run: docker build -t dhcpy6d-packaging-check -f tests/packaging/Dockerfile .
++      - name: Check Debian install/upgrade/purge and RPM scriptlets
++        run: |
++          version="$(dpkg-parsechangelog -SVersion)"
++          package="$(readlink -f "../dhcpy6d_${version#*:}_all.deb")"
++          docker run --rm --network none \
++            --mount "type=bind,src=$PWD,dst=/src,readonly" \
++            --mount "type=bind,src=$package,dst=/tmp/package.deb,readonly" \
++            dhcpy6d-packaging-check sh /src/tests/packaging/check-install.sh /tmp/package.deb
+--- a/.gitignore
++++ b/.gitignore
+@@ -1,6 +1,33 @@
+ *.conf
+ *.pyc
++__pycache__/
+ *.yaml
+ *.db
+ *.log
+ .idea
++
++# Generated artifacts
++sbin/
++*.egg-info/
++build/
++dist/
++.pybuild/
++.venv/
++.venv311/
++man/man5/*.5
++man/man8/*.8
++
++# Debian package build artifacts
++debian/.debhelper/
++debian/debhelper-build-stamp
++debian/files
++debian/*.debhelper
++debian/*.debhelper.log
++debian/*.substvars
++debian/tmp/
++debian/dhcpy6d/
++
++# Docker interoperability test results
++e2e-artifacts/
++
++man/man7/*.7
+--- a/MANIFEST.in
++++ b/MANIFEST.in
+@@ -8,11 +8,11 @@
+ include doc/dhcpy6d-minimal.conf
+ include doc/volatile.sql
+ include doc/volatile.postgresql
+-include man/man5/dhcpy6d.conf.5
+-include man/man5/dhcpy6d-clients.conf.5
+-include man/man8/dhcpy6d.8
+ include var/lib/volatile.sqlite
+ include var/log/dhcpy6d.log
+ include etc/dhcpy6d.conf
+ include etc/logrotate.d/dhcpy6d
+ include lib/systemd/system/dhcpy6d.service
++
++include doc/reconfigure.rst
++include scripts/setup-reconfigure-state
+--- a/dhcpy6d/config.py
++++ b/dhcpy6d/config.py
+@@ -265,6 +265,9 @@
+
+         # restore still valid routes at startup and remove inactive ones
+         self.MANAGE_ROUTES_AT_START = 'False'
++
++        # Empty disables authenticated, server-initiated renewals.
++        self.RECONFIGURE_STATE_FILE = ''
+
+         # regexp filters for hostnames etc.
+         self.FILTERS = {'mac': [], 'duid': [], 'hostname': []}
+--- a/dhcpy6d/handler.py
++++ b/dhcpy6d/handler.py
+@@ -23,6 +23,7 @@
+ import sys
+ import traceback
+
++from . import reconfigure
+ from .client import Client
+ from .config import cfg
+ from .constants import CONST
+@@ -427,12 +428,16 @@
+             # list of options in answer to be logged
+             options_answer = []
+
+-            # Option 20 reconfigure accept - for client compatibility, actually
+-            # not really supported, added here to add to options
+-            # https://github.com/HenriWahl/dhcpy6d/issues/64
++            # Echo Reconfigure Accept for client compatibility (issue #64).
++            # When RKAP is enabled, final Reply negotiation is handled below.
+             if CONST.OPTION.RECONF_ACCEPT in transaction.options.keys() and \
+                 not CONST.OPTION.RECONF_ACCEPT in options_request:
+                 options_request.append(CONST.OPTION.RECONF_ACCEPT)
++
++            # RKAP negotiation is added to the final successful Reply below.
++            # Do not emit a duplicate or unconditional Reconfigure Accept there.
++            if reconfigure.service is not None and message_type_response == CONST.MESSAGE.REPLY:
++                options_request = [number for number in options_request if number != CONST.OPTION.RECONF_ACCEPT]
+
+             # build all requested options if they are handled
+             for number in options_request:
+@@ -538,6 +543,13 @@
+
+             # handler
+             self.response = binascii.unhexlify(response_string)
++            if reconfigure.service is not None and cfg.REALLY_DO_IT:
++                try:
++                    self.response += reconfigure.service.reply_options(transaction, self.response)
++                except Exception as error:
++                    # A key must be durably recorded before advertising support.
++                    # Ordinary DHCP replies remain available if state storage fails.
++                    log.error(f'Reconfigure state update failed: {error}')
+
+         except Exception as err:
+             traceback.print_exc(file=sys.stdout)
+@@ -584,4 +596,6 @@
+                 cfg.ADDRESSES[a].inject_dynamic_prefix_into_prototype(cfg.PREFIX)
+             for p in cfg.PREFIXES:
+                 cfg.PREFIXES[p].inject_dynamic_prefix_into_prototype(cfg.PREFIX)
++            if reconfigure.service is not None and cfg.PREFIX:
++                reconfigure.service.trigger()
+         log.info(f'Control message \'{" ".join(control_message_clean)}\' received')
+--- /dev/null
++++ b/dhcpy6d/reconfigure.py
+@@ -0,0 +1,192 @@
++"""Authenticated DHCPv6 Reconfigure (RFC 8415 sections 19 and 20.4).
++
++The private state database is separate from the lease database so authentication
++keys and replay counters survive lease cleanup and work with every lease backend.
++"""
++import hashlib
++import hmac
++import ipaddress
++import os
++import secrets
++import socket
++import sqlite3
++import struct
++import threading
++import time
++
++
++service = None
++
++
++def option(code, value):
++    return struct.pack('!HH', code, len(value)) + value
++
++
++def options(data):
++    """Decode complete TLVs, rejecting truncated options."""
++    while data:
++        if len(data) < 4:
++            raise ValueError('truncated DHCPv6 option header')
++        code, length = struct.unpack('!HH', data[:4])
++        if len(data) < 4 + length:
++            raise ValueError('truncated DHCPv6 option value')
++        yield code, data[4:4 + length]
++        data = data[4 + length:]
++
++
++def reply_lifetime(data):
++    """Return longest live IA_NA/IA_PD lifetime, or zero for failed Replies."""
++    lifetimes = []
++    for code, value in options(data):
++        if code == 13 and (len(value) < 2 or value[:2] != b'\x00\x00'):
++            return 0
++        if code not in (3, 25):
++            continue
++        if len(value) < 12:
++            return 0
++        ia_lifetimes = []
++        for subcode, subvalue in options(value[12:]):
++            if subcode == 13 and (len(subvalue) < 2 or subvalue[:2] != b'\x00\x00'):
++                return 0
++            if code == 3 and subcode == 5 and len(subvalue) >= 24:
++                ia_lifetimes.append(struct.unpack('!I', subvalue[20:24])[0])
++            elif code == 25 and subcode == 26 and len(subvalue) >= 25:
++                ia_lifetimes.append(struct.unpack('!I', subvalue[4:8])[0])
++        # A stable IA_NA must not hide a failed/withdrawn delegated prefix.
++        if not max(ia_lifetimes, default=0):
++            return 0
++        lifetimes.extend(ia_lifetimes)
++    return max(lifetimes, default=0)
++
++
++class ReconfigureService(threading.Thread):
++    """Track consenting clients and send bounded, authenticated Renew triggers."""
++    MAX_ATTEMPTS = 8
++
++    def __init__(self, path, server_duid, sock, interfaces, log, clock=time.time):
++        super().__init__(name='reconfigure', daemon=True)
++        self.server_duid = server_duid.lower()
++        self.sock = sock
++        self.interfaces = set(interfaces)
++        self.log = log
++        self.clock = clock
++        self.lock = threading.RLock()
++        self.stopped = threading.Event()
++        self.pending = {}
++        # Create the file privately before SQLite opens it. Never follow symlinks.
++        fd = os.open(path, os.O_CREAT | os.O_RDWR | os.O_NOFOLLOW, 0o600)
++        try:
++            os.fchmod(fd, 0o600)
++        finally:
++            os.close(fd)
++        self.db = sqlite3.connect(path, check_same_thread=False)
++        self.db.execute('''CREATE TABLE IF NOT EXISTS clients (
++            server TEXT NOT NULL, duid TEXT NOT NULL, interface TEXT NOT NULL,
++            address TEXT NOT NULL, key BLOB NOT NULL, replay INTEGER NOT NULL,
++            expires INTEGER NOT NULL, PRIMARY KEY (server, duid, interface))''')
++        self.db.commit()
++
++    def close(self):
++        self.stopped.set()
++        if self.is_alive():
++            self.join()
++        with self.lock:
++            self.db.close()
++
++    def reply_options(self, transaction, response):
++        """Provision RKAP in initial Replies; acknowledge successful renewals.
++
++        Called only for the final Reply, after all normal error handling. Never
++        include keys in logs, Advertise, errors, or replies without live leases.
++        """
++        if len(response) < 4 or response[0] != 7:
++            return b''
++        if transaction.interface not in self.interfaces:
++            return b''
++        address = ipaddress.IPv6Address(int(transaction.client_llip, 16))
++        if not address.is_link_local:
++            return b''
++        duid = transaction.duid.lower()
++        bytes.fromhex(duid)
++        identity = (self.server_duid, duid, transaction.interface)
++        initial = transaction.last_message_received_type in (1, 3)
++        if transaction.last_message_received_type == 8:
++            status = dict(options(response[4:])).get(13)
++            if status is not None and len(status) >= 2 and status[:2] == b'\x00\x00':
++                with self.lock, self.db:
++                    self.db.execute('DELETE FROM clients WHERE server=? AND duid=? AND interface=?', identity)
++                    self.pending.pop(identity, None)
++            return b''
++        lifetime = reply_lifetime(response[4:])
++        if not lifetime:
++            return b''
++        with self.lock, self.db:
++            row = self.db.execute('SELECT key, replay FROM clients WHERE server=? AND duid=? AND interface=?',
++                                  identity).fetchone()
++            if initial and transaction.options.get(20) != '':
++                self.db.execute('DELETE FROM clients WHERE server=? AND duid=? AND interface=?', identity)
++                self.pending.pop(identity, None)
++                return b''
++            if row is None and not initial:
++                return b''
++            key, replay = row if row else (secrets.token_bytes(16), 0)
++            if initial:
++                replay += 1
++            self.db.execute('INSERT OR REPLACE INTO clients VALUES (?, ?, ?, ?, ?, ?, ?)',
++                            (*identity, str(address), key, replay, int(self.clock()) + lifetime))
++            self.pending.pop(identity, None)
++            if not initial:
++                return b''
++            # Protocol 3, HMAC-MD5 algorithm 1, counter RDM 0, key type 1.
++            auth = b'\x03\x01\x00' + struct.pack('!Q', replay) + b'\x01' + key
++            return option(20, b'') + option(11, auth)
++
++    def trigger(self):
++        """Queue currently consenting, unexpired clients; coalesce repeated triggers."""
++        with self.lock, self.db:
++            now = self.clock()
++            self.db.execute('DELETE FROM clients WHERE expires <= ?', (int(now),))
++            for duid, interface in self.db.execute(
++                    'SELECT duid, interface FROM clients WHERE server=?', (self.server_duid,)):
++                if interface in self.interfaces:
++                    self.pending.setdefault((self.server_duid, duid, interface), (now, 0))
++
++    def poll(self):
++        """Send due attempts. Persist a fresh replay value before every send."""
++        with self.lock:
++            now = self.clock()
++            for identity, (due, attempts) in list(self.pending.items()):
++                if due > now:
++                    continue
++                row = self.db.execute('SELECT address, key, replay, expires FROM clients '
++                                      'WHERE server=? AND duid=? AND interface=?', identity).fetchone()
++                if row is None or row[3] <= now or attempts >= self.MAX_ATTEMPTS:
++                    del self.pending[identity]
++                    continue
++                address, key, replay, _expires = row
++                # One retry gets its own counter and HMAC, even if the last send failed.
++                replay += 1
++                with self.db:
++                    self.db.execute('UPDATE clients SET replay=? WHERE server=? AND duid=? AND interface=?',
++                                    (replay, *identity))
++                packet = (b'\x0a\x00\x00\x00' + option(2, bytes.fromhex(self.server_duid)) +
++                          option(1, bytes.fromhex(identity[1])) + option(19, b'\x05') +
++                          option(11, b'\x03\x01\x00' + struct.pack('!Q', replay) + b'\x02' + bytes(16)))
++                digest = hmac.new(key, packet, hashlib.md5).digest()
++                packet = packet[:-16] + digest
++                # RFC 8415 retransmission jitter prevents synchronized renew storms.
++                delay = min(2 ** (attempts + 1), 64) * (0.9 + secrets.randbelow(201) / 1000)
++                self.pending[identity] = (now + delay, attempts + 1)
++                try:
++                    index = socket.if_nametoindex(identity[2])
++                    self.sock.sendto(packet, (address, 546, 0, index))
++                    self.log.info(f'Reconfigure Renew sent to {address}%{identity[2]} (attempt {attempts + 1})')
++                except OSError as error:
++                    self.log.warning(f'Reconfigure send failed on {identity[2]}: {error}')
++
++    def run(self):
++        while not self.stopped.wait(0.25):
++            try:
++                self.poll()
++            except Exception as error:
++                self.log.error(f'Reconfigure worker failed: {error}')
+--- a/dhcpy6d/storage/sqlite.py
++++ b/dhcpy6d/storage/sqlite.py
+@@ -47,10 +47,9 @@
+         """
+         initialize DB connection
+         """
+-        # only import if needed
+-        if 'sqlite3' not in sys.modules:
+-            import sqlite3
+-            self.db_module = sqlite3
++        # Each backend instance needs its module even if another user imported it.
++        import sqlite3
++        self.db_module = sqlite3
+         try:
+             if storage_type == 'volatile':
+                 storage = cfg.STORE_SQLITE_VOLATILE
+@@ -65,6 +64,12 @@
+             traceback.print_exc(file=sys.stdout)
+             sys.stdout.flush()
+             return None
++
++    def create_tables(self):
++        # The initial schema-version INSERT must not leave a transaction open
++        # when the asynchronous lease worker starts its first explicit batch.
++        super().create_tables()
++        self.connection.commit()
+
+     def db_query(self, query):
+         """
+--- a/doc/dhcpy6d-example.conf
++++ b/doc/dhcpy6d-example.conf
+@@ -104,6 +104,10 @@
+ # might be of use for debugging and testing.
+ really_do_it = no
+
++# Optional: authenticated server-initiated Renew after restart/prefix updates.
++# Preserve this private state file across restarts. See doc/reconfigure.rst.
++# reconfigure_state_file = /var/lib/dhcpy6d/reconfigure.sqlite
++
+ # Declare which attributes of a requesting client should be checked
+ # to prove its identity. Default is "mac", but "duid" and "hostname"
+ # are allowed too. It is even possible to mix them, separated by
+--- a/doc/dhcpy6d.conf.rst
++++ b/doc/dhcpy6d.conf.rst
+@@ -251,6 +251,15 @@
+ **manage_routes_at_start = yes|no**
+     Check prefixes at startup and call commands for adding and deleting routes respectively.
+     *Default: no*
++
++
++**reconfigure_state_file = <path>**
++    Enable authenticated DHCPv6 Reconfigure and persist client keys and replay
++    counters in this private SQLite file. The parent directory must be writable
++    by the daemon user. Consenting clients are prompted to Renew at startup and
++    after dynamic prefix updates. See **dhcpy6d-reconfigure(7)** for client setup and
++    rollout requirements.
++    *Default: empty (disabled)*
+
+
+ Address definitions in multiple [address_<address_name>] sections
+--- /dev/null
++++ b/doc/reconfigure.rst
+@@ -0,0 +1,97 @@
++===================
++dhcpy6d-reconfigure
++===================
++
++-------------------------------------
++Authenticated DHCPv6 client renewal
++-------------------------------------
++
++:Author: Felix Jacobi
++:Date: 2026-10-28
++:Version: 1.7.0
++:Manual section: 7
++:Manual group: System administration
++
++DESCRIPTION
++===========
++
++DHCPy6d can send DHCPv6 Reconfigure messages requesting an immediate Renew
++(RFC 8415 sections 19 and 20.4). This is opt-in on the server::
++
++    [dhcpy6d]
++    reconfigure_state_file = /var/lib/dhcpy6d/reconfigure.sqlite
++
++The directory must already exist and be writable by the configured daemon user.
++The SQLite file is created with mode 0600 and contains private authentication
++keys. Keep it across restarts and lease-database cleanup. It is independent of
++the configured lease backend. An empty setting (the default) disables this
++feature. Dry-run mode does not open authentication state or send Reconfigure.
++
++Debian and RPM package installation prepares the private state file with daemon
++ownership and mode 0600. Upgrades preserve existing keys and counters. This setup
++does not enable the feature or modify existing local configurations; enable it
++explicitly with the setting above.
++
++A client must include Reconfigure Accept in its initial Request or Rapid Commit
++exchange. DHCPy6d then supplies a random 128-bit per-client/interface key in the
++successful Reply. Existing clients need a new initial exchange before they can
++be notified; their already-running leases cannot be enrolled retroactively.
++For dhcpcd 9.4.1, explicitly enable acceptance with::
++
++    option dhcp6_name_servers, dhcp6_domain_search, dhcp6_rapid_commit
++    option dhcp6_reconfigure_accept
++
++Explicit DHCPv6 options disable dhcpcd's automatic IPv4 option mapping; retain
++the DNS, domain-search and Rapid Commit requests above as needed.
++
++Keep authentication enabled: do not add ``noauthrequired``. dhcpcd already
++implements RKAP; no client source patch or shared secret configuration is needed.
++
++At server startup, clients with unexpired authentication records are asked to
++renew. A dynamic ``prefix`` control command triggers the same operation after
++applying the new prefix, including recovery of the same prefix. Startup skips
++the trigger when a configured dynamic prefix is unavailable. Clients outside
++the current interface list and expired records are excluded.
++
++Messages go to each client's link-local address on its recorded interface, UDP
++port 546, from the server's existing port-547 socket. Each message is authenticated
++with HMAC-MD5 and a fresh replay counter committed before transmission. There are
++at most eight attempts, starting at two seconds and backing off to a nominal 64 seconds, with jitter.
++Repeated triggers coalesce; successful lease Replies cancel pending attempts.
++Release removes the client's record. Keys and counters are scoped to the server
++DUID so changing identity cannot reuse another server's negotiated state.
++
++This feature triggers the normal Renew handler; it does not change lease
++selection or route-hook behavior. The Docker suite verifies that dhcpcd recovers
++a changed IA_PD while retaining a stable IA_NA: withdrawal is followed by a repeated
++authenticated prompt and a fresh allocation. Upstream still lacks Renew route-up
++hooks for restoring a deleted route to an unchanged valid delegation; that is a
++separate known failure in the suite.
++
++Compatibility check
++-------------------
++
++The Python tests independently decode packets and verify their HMACs, persistence,
++expiry, retries, Release, and Reply integration. The optional C checker also uses
++dhcpcd 9.4.1's actual ``dhcp_auth_validate`` function to verify valid messages,
++reject replayed and tampered messages, and accept the next packet after reopening
++server state. This tests authentication interoperability, not a live DSL outage.
++
++Build dhcpcd 9.4.1 in a temporary directory (no installation required)::
++
++    ./configure --without-udev --without-dev --disable-privsep
++    make
++    cc -std=c99 -D_GNU_SOURCE -DAUTH -I. -Isrc \
++        /path/to/dhcpy6d/tests/dhcpcd_auth_check.c src/auth.o \
++        compat/crypt/hmac.o compat/crypt/md5.o compat/crypt/sha256.o \
++        -o /tmp/dhcpcd-auth-check
++
++Then run in the DHCPy6d checkout::
++
++    DHCPCD_AUTH_CHECK=/tmp/dhcpcd-auth-check \
++        python3 -m unittest tests.test_reconfigure_dhcpcd -v
++
++SEE ALSO
++========
++
++**dhcpy6d(8)**, **dhcpy6d.conf(5)**, **dhcpcd.conf(5)**
+--- a/main.py
++++ b/main.py
+@@ -32,7 +32,7 @@
+ import os
+ import socket
+
+-from dhcpy6d import UDPMulticastIPv6
++from dhcpy6d import UDPMulticastIPv6, reconfigure
+ from dhcpy6d.config import cfg
+ from dhcpy6d.pidfile import write_pid_file
+
+@@ -127,6 +127,16 @@
+     os.setgid(grp.getgrnam(cfg.GROUP).gr_gid)
+     os.setuid(pwd.getpwnam(cfg.USER).pw_uid)
+
++    # Open private authentication state as the daemon user, after dropping root.
++    if cfg.RECONFIGURE_STATE_FILE and cfg.REALLY_DO_IT:
++        reconfigure.service = reconfigure.ReconfigureService(
++            cfg.RECONFIGURE_STATE_FILE, cfg.SERVERDUID, udp_server.socket, cfg.INTERFACE, log)
++        # Do not prompt clients while the upstream dynamic prefix is unavailable.
++        patterns = list(cfg.ADDRESSES.values()) + list(cfg.PREFIXES.values())
++        if cfg.PREFIX or not any('$prefix$' in item.PATTERN for item in patterns):
++            reconfigure.service.trigger()
++        reconfigure.service.start()
++
+     # log interfaces
+     log.info(f'Listening on interfaces: {" ".join(IF_NAME)}')
+
+@@ -135,6 +145,10 @@
+         udp_server.serve_forever()
+     except KeyboardInterrupt:
+         sys.exit(0)
++    finally:
++        if reconfigure.service is not None:
++            reconfigure.service.close()
++        udp_server.server_close()
+
+
+ if __name__ == '__main__':
+--- a/redhat/dhcpy6d.spec
++++ b/redhat/dhcpy6d.spec
+@@ -27,6 +27,7 @@
+ BuildRequires: python3
+ BuildRequires: python3-setuptools
+ BuildRequires: python3-devel
++BuildRequires: python3-docutils
+ Requires: python3
+
+ BuildRequires: systemd
+@@ -56,6 +57,9 @@
+ %setup -q
+
+ %build
++ls -lR
++#%{__python3} scripts/generate_manpages.py --out-dir .
++rm -rf tests
+ %py3_build
+ #CFLAGS="%{optflags}" %{__python3} setup.py build
+
+@@ -99,10 +103,14 @@
+ if [ ! -f ${file} ]
+     then
+     /bin/touch ${file}
+-    /bin/chmod 0775 %{_localstatedir}/lib/%{name}
++    /bin/chmod 0770 %{_localstatedir}/lib/%{name}
+ fi
+ /bin/chown %{dhcpy6d_uid}:%{dhcpy6d_gid} ${file}
+ /bin/chmod 0640 ${file}
++
++# Prepare private state without enabling Reconfigure or replacing existing keys.
++%{__python3} %{_datadir}/%{name}/setup-reconfigure-state \
++    %{_localstatedir}/lib/%{name} %{dhcpy6d_uid} %{dhcpy6d_gid}
+
+ %preun
+ if [ "$1" = "0" ]; then
+@@ -142,12 +150,15 @@
+ %{_mandir}/man?/*
+ %{_sbindir}/%{name}
+ %{python3_sitelib}/*dhcpy6*
++%{_datadir}/%{name}/setup-reconfigure-state
+ %config(noreplace) %{_sysconfdir}/logrotate.d/%{name}
+ %config(noreplace) %{_sysconfdir}/%{name}.conf
+ %exclude %{_localstatedir}/log/%{name}.log
+ %{_unitdir}/%{name}.service
+-%dir %attr(0775,%{dhcpy6d_uid},%{dhcpy6d_gid}) %{_localstatedir}/lib/%{name}
++%dir %attr(0770,%{dhcpy6d_uid},%{dhcpy6d_gid}) %{_localstatedir}/lib/%{name}
+ %config(noreplace) %attr(0644,%{dhcpy6d_uid},%{dhcpy6d_gid}) %{_localstatedir}/lib/%{name}/volatile.sqlite
++
++%ghost %attr(0600,%{dhcpy6d_uid},%{dhcpy6d_gid}) %{_localstatedir}/lib/%{name}/reconfigure.sqlite
+
+ %changelog
+ * Fri Jul 24 2020 Henri Wahl <h.wahl@ifw-dresden.de> - 1.0.1-1
+--- a/scripts/generate_manpages.py
++++ b/scripts/generate_manpages.py
+@@ -15,6 +15,7 @@
+
+ MAPPINGS = [
+     ("doc/dhcpy6d.rst", "man/man8/dhcpy6d.8"),
++    ("doc/reconfigure.rst", "man/man7/dhcpy6d-reconfigure.7"),
+     ("doc/dhcpy6d.conf.rst", "man/man5/dhcpy6d.conf.5"),
+     ("doc/dhcpy6d-clients.conf.rst", "man/man5/dhcpy6d-clients.conf.5"),
+ ]
+--- /dev/null
++++ b/scripts/setup-reconfigure-state
+@@ -0,0 +1,47 @@
++#!/usr/bin/python3
++"""Prepare private RKAP state without resetting keys or replay counters."""
++import errno
++import grp
++import os
++import pwd
++import stat
++import sys
++
++
++def prepare_state(directory, user, group):
++    uid = pwd.getpwnam(user).pw_uid
++    gid = grp.getgrnam(group).gr_gid
++    os.makedirs(directory, mode=0o770, exist_ok=True)
++    directory_fd = os.open(directory, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
++    try:
++        os.fchown(directory_fd, uid, gid)
++        os.fchmod(directory_fd, 0o770)
++        try:
++            state_fd = os.open('reconfigure.sqlite',
++                os.O_CREAT | os.O_RDWR | os.O_NOFOLLOW | os.O_NONBLOCK,
++                0o600, dir_fd=directory_fd)
++        except OSError as error:
++            if error.errno == errno.ELOOP:
++                raise ValueError('Reconfigure state must be a regular file') from error
++            raise
++        try:
++            info = os.fstat(state_fd)
++            if not stat.S_ISREG(info.st_mode) or info.st_nlink != 1:
++                raise ValueError('Reconfigure state must be a regular file with one link')
++            # Operate only on the opened inode: a daemon-controlled pathname may
++            # be replaced during an upgrade while this script runs as root.
++            os.fchown(state_fd, uid, gid)
++            os.fchmod(state_fd, 0o600)
++        finally:
++            os.close(state_fd)
++    finally:
++        os.close(directory_fd)
++
++
++if __name__ == '__main__':
++    if len(sys.argv) != 4:
++        sys.exit('usage: setup-reconfigure-state DIRECTORY USER GROUP')
++    try:
++        prepare_state(*sys.argv[1:])
++    except (OSError, KeyError, ValueError) as error:
++        sys.exit(f'Cannot prepare Reconfigure state: {error}')
+--- /dev/null
++++ b/scripts/test-e2e.sh
+@@ -0,0 +1,41 @@
++#!/usr/bin/env bash
++set -euo pipefail
++repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
++image="${E2E_IMAGE:-dhcpy6d-e2e:local}"
++artifacts="${E2E_ARTIFACTS:-${repo_root}/e2e-artifacts}"
++mkdir -p "$artifacts"
++if [[ "${E2E_SKIP_BUILD:-0}" != 1 ]]; then
++    docker build -t "$image" -f "$repo_root/tests/e2e/Dockerfile" "$repo_root"
++fi
++clients=("$@")
++if [[ ${#clients[@]} == 0 ]]; then
++    clients=(kea dhclient dhcpcd networkd)
++fi
++container_id=''
++cleanup() {
++    if [[ -n "$container_id" ]]; then
++        docker rm -f "$container_id" >/dev/null
++    fi
++}
++trap cleanup EXIT INT TERM
++status=0
++for client in "${clients[@]}"; do
++    extra=()
++    if [[ -n "${E2E_TEST:-}" ]]; then
++        extra=(--test "$E2E_TEST")
++    fi
++    # All namespaces, veths and capabilities belong to this disposable container.
++    container_id="$(docker create --privileged --network none \
++        --mount "type=bind,src=${repo_root},dst=/src,readonly" \
++        --tmpfs /run --tmpfs /tmp \
++        "$image" --client "$client" "${extra[@]}")"
++    docker start -a "$container_id" || true
++    code="$(docker inspect --format '{{.State.ExitCode}}' "$container_id")"
++    docker cp "$container_id:/artifacts/." "$artifacts/"
++    if [[ "$code" != 0 ]]; then
++        status=1
++    fi
++    cleanup
++    container_id=''
++done
++exit "$status"
+--- a/setup.py
++++ b/setup.py
+@@ -68,6 +68,7 @@
+               ('/var/log', ['var/log/dhcpy6d.log']),
+               ('/usr/share/doc/dhcpy6d', ['doc/clients-example.conf',
+                                           'doc/config.sql',
++                                          'doc/reconfigure.rst',
+                                           'doc/dhcpy6d-example.conf',
+                                           'doc/dhcpy6d-minimal.conf',
+                                           'doc/LICENSE',
+@@ -76,6 +77,8 @@
+               ('/usr/share/man/man5', existing(['man/man5/dhcpy6d.conf.5',
+                                                 'man/man5/dhcpy6d-clients.conf.5'])),
+               ('/usr/share/man/man8', existing(['man/man8/dhcpy6d.8'])),
++              ('/usr/share/man/man7', existing(['man/man7/dhcpy6d-reconfigure.7'])),
++              ('/usr/share/dhcpy6d', ['scripts/setup-reconfigure-state']),
+               ('/etc', ['etc/dhcpy6d.conf']),
+               ('/usr/sbin', ['sbin/dhcpy6d']),
+               ]
+--- /dev/null
++++ b/tests/dhcpcd_auth_check.c
+@@ -0,0 +1,38 @@
++#include <sys/types.h>
++#include <stdint.h>
++#include <stdio.h>
++#include <stdlib.h>
++#include <string.h>
++#include "auth.h"
++
++int main(int argc, char **argv) {
++    struct authstate state = {0};
++    struct auth auth = {0};
++    auth.options = DHCPCD_AUTH_REQUIRE;
++    TAILQ_INIT(&auth.tokens);
++    for (int n = 1; n < argc; n++) {
++        unsigned char packet[8192];
++        FILE *file = fopen(argv[n] + 1, "rb");
++        if (!file) return 2;
++        size_t length = fread(packet, 1, sizeof(packet), file);
++        fclose(file);
++        size_t pos = 4, authpos = 0, authlen = 0;
++        while (pos + 4 <= length) {
++            size_t code = packet[pos] * 256 + packet[pos+1];
++            size_t len = packet[pos+2] * 256 + packet[pos+3];
++            if (pos + 4 + len > length) return 3;
++            if (code == 11) { authpos = pos + 4; authlen = len; }
++            pos += 4 + len;
++        }
++        if (!authpos) return 4;
++        int accepted = dhcp_auth_validate(&state, &auth, packet, length, 6,
++            packet[0], packet + authpos, authlen) != NULL;
++        if (accepted != (argv[n][0] == '+')) {
++            fprintf(stderr, "Unexpected authentication result for case %d\n", n);
++            return 5;
++        }
++        printf("case %d: %s as expected\n", n, accepted ? "accepted" : "rejected");
++    }
++    dhcp_auth_reset(&state);
++    return 0;
++}
+--- /dev/null
++++ b/tests/e2e/Dockerfile
+@@ -0,0 +1,9 @@
++FROM debian:bookworm-slim
++ENV DEBIAN_FRONTEND=noninteractive
++RUN apt-get update && apt-get install -y --no-install-recommends \
++    python3 python3-dnspython python3-distro python3-scapy \
++    iproute2 iptables isc-dhcp-client isc-dhcp-relay dhcpcd-base kea-admin \
++    systemd systemd-resolved dbus tcpdump procps ca-certificates \
++    && rm -rf /var/lib/apt/lists/*
++WORKDIR /src
++ENTRYPOINT ["python3", "/src/tests/e2e/run.py"]
+--- /dev/null
++++ b/tests/e2e/README.md
+@@ -0,0 +1,84 @@
++# DHCPv6 interoperability in Docker
++
++Run all clients:
++
++```sh
++scripts/test-e2e.sh
++```
++
++Run one client or case:
++
++```sh
++scripts/test-e2e.sh dhcpcd
++E2E_SKIP_BUILD=1 E2E_TEST=authenticated_reconfigure scripts/test-e2e.sh dhcpcd
++```
++
++Requirements: Linux, Docker Engine, and permission to run privileged containers.
++The container uses `--network none`, a read-only checkout, and container-private
++network namespaces linked by veth pairs. It never uses host networking, mounts
++host `/sys`, or receives the Docker socket. Privilege is needed to create network
++namespaces and run real DHCP clients; it is confined to this disposable container.
++Run this on a disposable CI/development runner, as with other privileged tests.
++
++The image uses Debian bookworm packages. Exact installed versions accompany every
++run. The server is the current checkout, not an installed package. No client or
++server is mocked. Packet capture starts before either endpoint, and assertions
++independently decode DHCPv6 TLVs. Tests inspect actual client kernel addresses,
++server lease persistence and prefix route hooks in addition to packet exchanges.
++Kea perfdhcp simulates clients and therefore does not configure kernel addresses.
++
++## Matrix
++
++| Scenario | Kea perfdhcp | ISC dhclient | dhcpcd | systemd-networkd |
++| --- | --- | --- | --- | --- |
++| Address, DNS and search options | Yes | Yes | Yes | Yes |
++| Address plus delegated prefix and route hook | Yes | Yes | Yes | Yes |
++| Rapid Commit | Yes | Explicit skip | Yes | Yes |
++| Renew | Yes | Yes | Yes | Yes |
++| Rebind after server outage | Tool limitation | Yes | Yes | Yes |
++| Release and persisted lease state | Generated traffic | Yes | Yes | Not implemented in systemd 252 |
++| Server restart / lease continuity | Yes | Yes | Yes | Yes |
++| Prefix control / subsequent allocation | Yes | Yes | Yes | Yes |
++| Live mixed-IA prefix renumbering with authenticated retries | — | — | Yes | — |
++| Deleted delegated route restored by Renew | — | — | Known server gap | — |
++| Authenticated Reconfigure, immediate Renew and replay progression after restart | No RKAP client | Not enabled | Yes | Not enabled |
++| Kea relay-forward simulation | Known server gap | — | — | — |
++| ISC dhcrelay between separate upstream/downstream links | — | Known server gap | Known server gap | Known server gap |
++
++Kea is a server suite. Its `perfdhcp` tool drives direct exchanges and generates
++encapsulated relay-forward messages with `-A 1`; it is not a standalone relay.
++ISC dhcrelay is tested as a real process in a third namespace. These relay tests
++first require an observed Relay-forward packet, then report the current server's
++missing relay handling as a **known failure**. Setup errors or failure to generate
++relay traffic fail normally. A working relayed exchange causes an unexpected
++success failure until the known-gap marker is removed after review.
++
++Reconfigure enrollment requires an initial Request/Reply or Rapid Commit exchange.
++The authenticated test sets T1 to 120 seconds and requires the real dhcpcd client
++to send Renew within eight seconds of a signed Reconfigure, excluding timer-driven
++renewal. It independently checks the HMAC and increasing counter after restart, and requires
++rejection of a tampered newer-counter message and an exact replay without Renew.
++
++Live renumbering retains a stable IA_NA while changing the IA_PD prefix. With
++real dhcpcd, the first Renew withdraws the old PD; a repeated authenticated prompt
++causes a fresh allocation. The test requires the replacement prefix in packets
++and the actual new delegated-prefix route in the client kernel. This does not
++prove equivalent behavior in clients that do not implement RKAP.
++
++Deleting an existing server-side delegated route and renewing the same prefix
++still demonstrates the independent missing Renew route-up hook on this upstream
++branch. This is a narrowly checked known failure; the route hook exists separately
++in the NMU branch. The suite records that limitation rather than calling it a pass.
++
++## Evidence and CI
++
++`e2e-artifacts/` contains JUnit XML, client/package versions, server/client/relay
++logs, packet JSONL and PCAP files, final namespace address/route state, and the
++lease databases. These are synthetic test identities/keys only. Each case has its
++own directory and fresh namespaces/state. All processes and the disposable
++container are cleaned up even when a test fails. No daemon or interface is created
++on the host network.
++
++The GitHub Actions `DHCPv6 interoperability` workflow runs four independent matrix
++jobs on an Ubuntu runner with Docker, preserves evidence even on failure, and
++keeps capability skips/known failures visible in JUnit and the test output.
+--- /dev/null
++++ b/tests/e2e/capture.py
+@@ -0,0 +1,25 @@
++"""Capture wire evidence independently of DHCPy6d's packet parser."""
++import json
++from pathlib import Path
++import sys
++import time
++from scapy.all import IPv6, UDP, PcapWriter, sniff
++
++root = Path(sys.argv[1])
++writer = PcapWriter(str(root / 'packets.pcap'), sync=True)
++stream = (root / 'packets.jsonl').open('a', buffering=1)
++
++def record(packet):
++    if IPv6 not in packet or UDP not in packet:
++        return
++    if packet[UDP].sport not in (546, 547) and packet[UDP].dport not in (546, 547):
++        return
++    payload = bytes(packet[UDP].payload)
++    if not payload:
++        return
++    writer.write(packet)
++    stream.write(json.dumps({'time': time.monotonic(), 'src': packet[IPv6].src,
++        'dst': packet[IPv6].dst, 'sport': packet[UDP].sport,
++        'dport': packet[UDP].dport, 'hex': payload.hex(), 'type': payload[0]}) + '\n')
++
++sniff(iface='srv', prn=record, store=False, started_callback=lambda: (root / 'capture.ready').touch())
+--- /dev/null
++++ b/tests/e2e/route-hook
+@@ -0,0 +1,8 @@
++#!/bin/sh
++set -eu
++printf '%s %s %s\n' "$1" "$2" "$3" >> /work/routes.log
++if [ "$1" = up ]; then
++    ip -6 route replace "$2" via "$3" dev srv
++else
++    ip -6 route del "$2" via "$3" dev srv 2>/dev/null || true
++fi
+--- /dev/null
++++ b/tests/e2e/run.py
+@@ -0,0 +1,612 @@
++#!/usr/bin/env python3
++"""Real-process DHCPv6 interoperability tests in container-private namespaces."""
++import argparse
++import hashlib
++import hmac
++import ipaddress
++import json
++import os
++from pathlib import Path
++import shutil
++import signal
++import sqlite3
++import struct
++import subprocess
++import sys
++import time
++import unittest
++import xml.etree.ElementTree as ET
++
++ROOT = Path('/src')
++ARTIFACTS = Path('/artifacts')
++CLIENT = 'dhcpcd'
++
++
++class KnownGap(Exception):
++    pass
++
++
++def command(*args, ns=None, check=True):
++    argv = (['ip', 'netns', 'exec', ns] if ns else []) + list(args)
++    return subprocess.run(argv, check=check, text=True, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, timeout=25)
++
++
++def tlvs(data):
++    result = []
++    while data:
++        if len(data) < 4:
++            raise AssertionError('truncated option header')
++        code, length = struct.unpack('!HH', data[:4])
++        if len(data) < length + 4:
++            raise AssertionError('truncated option body')
++        result.append((code, data[4:4 + length]))
++        data = data[4 + length:]
++    return result
++
++
++def inner(event):
++    data = bytes.fromhex(event['hex'])
++    while data[0] in (12, 13):
++        data = dict(tlvs(data[34:]))[9]
++    return data
++
++
++def resources(event, kind):
++    values = []
++    for code, value in tlvs(inner(event)[4:]):
++        if code != kind:
++            continue
++        for subcode, sub in tlvs(value[12:]):
++            if kind == 3 and subcode == 5:
++                values.append((str(ipaddress.IPv6Address(sub[:16])), int.from_bytes(sub[20:24], 'big')))
++            if kind == 25 and subcode == 26:
++                values.append((str(ipaddress.IPv6Network((ipaddress.IPv6Address(sub[9:25]), sub[8]))), int.from_bytes(sub[4:8], 'big')))
++    return values
++
++
++class Lab:
++    def __init__(self, directory, relay=False):
++        self.directory = directory
++        self.processes = []
++        self.handles = []
++        self.server = None
++        self.client = None
++        self.relay = relay
++        self.relay_process = None
++        for state in ('/work', '/var/lib/dhcpcd', '/var/lib/dhcpcd5', '/run/systemd/netif', '/var/lib/dhcp', '/run/dhcpcd', '/run/dhcpcd5'):
++            shutil.rmtree(state, ignore_errors=True)
++        Path('/work').mkdir()
++        for ns in ('server', 'client') + (('relay',) if relay else ()):
++            command('ip', 'netns', 'add', ns)
++            command('ip', 'link', 'set', 'lo', 'up', ns=ns)
++        command('ip', 'link', 'add', 'srv', 'type', 'veth', 'peer', 'name', 'cli')
++        command('ip', 'link', 'set', 'srv', 'netns', 'server')
++        command('ip', 'link', 'set', 'cli', 'netns', 'relay' if relay else 'client')
++        self.interface('server', 'srv', 'fe80::1')
++        self.interface('relay' if relay else 'client', 'cli', 'fe80::2')
++        if relay:
++            command('ip', 'link', 'add', 'rdown', 'type', 'veth', 'peer', 'name', 'lan')
++            command('ip', 'link', 'set', 'rdown', 'netns', 'relay')
++            command('ip', 'link', 'set', 'lan', 'netns', 'client')
++            self.interface('relay', 'rdown', 'fe80::3')
++            self.interface('client', 'lan', 'fe80::4')
++            command('ip', '-6', 'addr', 'add', '2001:db8:ffff::1/64', 'dev', 'srv', ns='server')
++            command('ip', '-6', 'addr', 'add', '2001:db8:ffff::2/64', 'dev', 'cli', ns='relay')
++            command('ip', '-6', 'addr', 'add', '2001:db8:eeee::1/64', 'dev', 'rdown', ns='relay')
++            self.relay_process = self.spawn(['dhcrelay', '-6', '-d', '-l', 'rdown', '-u', '2001:db8:ffff::1%cli'], 'relay', 'relay.log')
++        self.iface = 'lan' if relay else 'cli'
++        self.spawn(['python3', str(ROOT / 'tests/e2e/capture.py'), str(directory)], 'server', 'capture.log')
++        self.wait(lambda: (directory / 'capture.ready').exists(), 5, 'packet capture startup')
++        self.write_config()
++        self.start_server()
++
++    @staticmethod
++    def interface(ns, iface, address):
++        command('ip', 'link', 'set', 'dev', iface, 'addrgenmode', 'none', ns=ns)
++        command('ip', 'link', 'set', iface, 'up', ns=ns)
++        command('ip', '-6', 'addr', 'flush', 'dev', iface, 'scope', 'link', ns=ns)
++        command('ip', '-6', 'addr', 'add', address + '/64', 'dev', iface, 'nodad', ns=ns)
++        command('ip', '-6', 'route', 'replace', 'ff00::/8', 'dev', iface, ns=ns)
++
++    def spawn(self, argv, ns, logfile):
++        handle = (self.directory / logfile).open('a')
++        self.handles.append(handle)
++        process = subprocess.Popen(['ip', 'netns', 'exec', ns] + argv, stdout=handle, stderr=subprocess.STDOUT,
++                                   start_new_session=True, env={**os.environ, 'PYTHONUNBUFFERED': '1', 'SYSTEMD_LOG_LEVEL': 'debug'})
++        self.processes.append(process)
++        return process
++
++    @staticmethod
++    def stop(process):
++        if process and process.poll() is None:
++            os.killpg(process.pid, signal.SIGTERM)
++            try:
++                process.wait(timeout=4)
++            except subprocess.TimeoutExpired:
++                os.killpg(process.pid, signal.SIGKILL)
++                process.wait(timeout=2)
++
++    def write_config(self, t1=10, t2=20, lifetime=90):
++        Path('/work/server.conf').write_text(f'''[dhcpy6d]
++interface = srv
++user = root
++group = root
++ignore_mac = yes
++store_config = none
++store_sqlite_volatile = /work/leases.sqlite
++serverduid = 0001000100010000020000000001
++really_do_it = yes
++log = yes
++log_console = yes
++nameserver = 2001:db8::53
++domain = e2e.test
++domain_search_list = e2e.test
++preferred_lifetime = {max(t2 + 1, lifetime // 2)}
++valid_lifetime = {lifetime}
++t1 = {t1}
++t2 = {t2}
++cleaning_interval = 1
++reconfigure_state_file = /work/reconfigure.sqlite
++[class_default]
++addresses = pool
++prefixes = pd
++advertise = addresses prefixes
++call_up = /src/tests/e2e/route-hook up $prefix$/$length$ $router$
++call_down = /src/tests/e2e/route-hook down $prefix$/$length$ $router$
++[address_pool]
++category = range
++pattern = $prefix$:1::$range$
++range = 100-1ff
++[prefix_pd]
++category = range
++pattern = $prefix$:100:$range$::
++range = 1-ff
++length = 64
++route_link_local = yes
++''')
++
++    def start_server(self):
++        Path('/work/leases.sqlite').touch(exist_ok=True)
++        self.server = self.spawn(['python3', '/src/main.py', '-c', '/work/server.conf', '-p', '2001:db8'], 'server', 'server.log')
++        def ready():
++            if self.server.poll() is not None:
++                raise AssertionError('server exited: ' + (self.directory / 'server.log').read_text())
++            return '0223' in command('cat', '/proc/net/udp6', ns='server').stdout
++        self.wait(ready, 8, 'server port 547')
++
++    def events(self):
++        path = self.directory / 'packets.jsonl'
++        records = []
++        if path.exists():
++            for line in path.read_text().splitlines():
++                try:
++                    records.append(json.loads(line))
++                except json.JSONDecodeError:
++                    pass  # Last line can be in flight while capturing.
++        return records
++
++    def wait(self, predicate, timeout=20, description='condition'):
++        deadline = time.monotonic() + timeout
++        while time.monotonic() < deadline:
++            value = predicate()
++            if value:
++                return value
++            time.sleep(0.1)
++        raise TimeoutError(f'timeout waiting for {description}; see {self.directory}')
++
++    def packet(self, message, since=0, timeout=20, predicate=lambda event: True):
++        return self.wait(lambda: next((e for e in self.events() if e['time'] >= since and
++            (e['type'] if message in (12, 13) else inner(e)[0]) == message and predicate(e)), None), timeout, f'DHCPv6 type {message}')
++
++    def start_client(self, pd=True, rapid=False, relay_sim=False, rates=False):
++        iface = self.iface
++        if CLIENT == 'kea':
++            argv = ['perfdhcp', '-6', '-l', iface, '-L', '546', '-r', '2', '-R', '1', '-p', '20',
++                    '-e', 'address-and-prefix' if pd else 'address-only', '-o', '6,00170018']
++            if relay_sim:
++                argv += ['-A', '1']
++            if rapid:
++                argv += ['-i', '-c']
++            if rates:
++                argv += ['-f', '1', '-F', '1']
++            elif not rapid:
++                argv += ['-f', '1']
++            argv += ['ff02::1:2']
++        elif CLIENT == 'dhclient':
++            Path('/var/lib/dhcp').mkdir(parents=True, exist_ok=True)
++            Path('/work/dhclient.conf').write_text('timeout 15;\ninitial-interval 1;\nrequest dhcp6.name-servers, dhcp6.domain-search;\n')
++            argv = ['dhclient', '-6', '-d', '-v', '-cf', '/work/dhclient.conf', '-lf', '/var/lib/dhcp/dhclient6.leases',
++                    '-pf', '/run/dhclient6.pid', '-sf', '/sbin/dhclient-script']
++            if pd:
++                argv += ['-P', '-N']
++            argv += [iface]
++        elif CLIENT == 'dhcpcd':
++            Path('/work/dhcpcd.conf').write_text(f'''duid 00:01:00:01:00:01:00:00:02:00:00:00:00:02
++ipv6only
++noipv6rs
++nohook resolv.conf,hostname,ntp
++option dhcp6_name_servers, dhcp6_domain_search, dhcp6_reconfigure_accept
++{'option dhcp6_rapid_commit' if rapid else 'nooption dhcp6_rapid_commit'}
++interface {iface}
++ ia_na 1
++{' ia_pd 1' if pd else ''}
++''')
++            argv = ['dhcpcd', '-6', '-d', '-B', '-f', '/work/dhcpcd.conf', iface]
++        else:
++            # networkd normally gets these from tmpfiles/udev under PID 1.
++            import pwd
++            uid = pwd.getpwnam('systemd-network').pw_uid
++            gid = pwd.getpwnam('systemd-network').pw_gid
++            for path in ('/run/systemd/netif', '/run/systemd/netif/links', '/run/systemd/netif/leases'):
++                Path(path).mkdir(parents=True, exist_ok=True)
++                os.chown(path, uid, gid)
++            Path('/run/udev/data').mkdir(parents=True, exist_ok=True)
++            index = json.loads(command('ip', '-j', 'link', 'show', 'dev', iface, ns='client').stdout)[0]['ifindex']
++            Path(f'/run/udev/data/n{index}').write_text('I:1\nE:ID_NET_DRIVER=veth\n')
++            Path('/etc/systemd/network').mkdir(parents=True, exist_ok=True)
++            Path('/etc/systemd/network/10-e2e.network').write_text(f'''[Match]
++Name={iface}
++[Network]
++DHCP=ipv6
++IPv6AcceptRA=no
++LinkLocalAddressing=ipv6
++[DHCPv6]
++WithoutRA=solicit
++UseAddress=yes
++UseDNS=no
++UseNTP=no
++RequestOptions=23 24
++PrefixDelegationHint={'::/64' if pd else ''}
++UseDelegatedPrefix={'yes' if pd else 'no'}
++RapidCommit={'yes' if rapid else 'no'}
++''')
++            argv = ['/lib/systemd/systemd-networkd']
++        self.client = self.spawn(argv, 'client', 'client.log')
++        return self.client
++
++    def release(self):
++        if CLIENT == 'dhclient':
++            command('dhclient', '-6', '-P', '-N', '-r', '-lf', '/var/lib/dhcp/dhclient6.leases', '-pf', '/run/dhclient6.pid',
++                    '-sf', '/sbin/dhclient-script', self.iface, ns='client', check=False)
++        elif CLIENT == 'dhcpcd':
++            command('dhcpcd', '-6', '-k', self.iface, ns='client')
++        else:
++            self.stop(self.client)
++
++    def control(self, prefix):
++        command('python3', '-c', "import socket; s=socket.socket(socket.AF_INET6,socket.SOCK_DGRAM); s.sendto(b'prefix " + prefix + "',('::1',547))", ns='server')
++
++    def inject(self, packet):
++        mac = json.loads(command('ip', '-j', 'link', 'show', 'dev', self.iface, ns='client').stdout)[0]['address']
++        script = ("from scapy.all import Ether,IPv6,UDP,Raw,sendp,get_if_hwaddr; import sys; "
++                  "sendp(Ether(src=get_if_hwaddr('srv'),dst=sys.argv[2])/IPv6(src='fe80::1',dst='fe80::2')/"
++                  "UDP(sport=547,dport=546)/Raw(bytes.fromhex(sys.argv[1])),iface='srv',verbose=False)")
++        command('python3', '-c', script, packet.hex(), mac, ns='server')
++
++    def rows(self, table):
++        with sqlite3.connect('/work/leases.sqlite') as db:
++            return db.execute(f'SELECT * FROM {table} WHERE active=1').fetchall()
++
++    def close(self):
++        for ns in ('server', 'client', 'relay'):
++            result = command('ip', '-j', '-6', 'addr', ns=ns, check=False)
++            (self.directory / (ns + '-addresses.json')).write_text(result.stdout)
++            result = command('ip', '-6', 'route', ns=ns, check=False)
++            (self.directory / (ns + '-routes.txt')).write_text(result.stdout)
++        for process in reversed(self.processes):
++            self.stop(process)
++        for handle in self.handles:
++            handle.close()
++        if Path('/var/lib/dhcp/dhclient6.leases').exists():
++            shutil.copy2('/var/lib/dhcp/dhclient6.leases', self.directory / 'dhclient.leases')
++        for name in ('leases.sqlite', 'reconfigure.sqlite', 'routes.log', 'server.conf', 'dhclient.leases'):
++            path = Path('/work') / name
++            if path.exists():
++                shutil.copy2(path, self.directory / name)
++        for ns in ('server', 'client', 'relay'):
++            # Also reap client helper processes that created their own process group.
++            for pid in command('ip', 'netns', 'pids', ns, check=False).stdout.split():
++                if pid.isdigit():
++                    try:
++                        os.kill(int(pid), signal.SIGKILL)
++                    except ProcessLookupError:
++                        pass
++            command('ip', 'netns', 'del', ns, check=False)
++
++
++class Interoperability(unittest.TestCase):
++    def setUp(self):
++        self.directory = ARTIFACTS / CLIENT / self._testMethodName
++        self.directory.mkdir(parents=True, exist_ok=True)
++        self.lab = None
++
++    def tearDown(self):
++        if self.lab:
++            self.lab.close()
++
++    def lab_start(self, **kwargs):
++        self.lab = Lab.__new__(Lab)
++        self.lab.__init__(self.directory, **kwargs)
++        return self.lab
++
++    def acquire(self, pd=True, rapid=False):
++        lab = self.lab_start()
++        lab.start_client(pd=pd, rapid=rapid)
++        event = lab.packet(7, predicate=lambda e: bool(resources(e, 3)))
++        self.assertTrue(all(ipaddress.IPv6Address(a) in ipaddress.IPv6Network('2001:db8:1::/64') and valid > 0 for a, valid in resources(event, 3)))
++        response_options = dict(tlvs(inner(event)[4:]))
++        self.assertEqual(response_options[23], ipaddress.IPv6Address('2001:db8::53').packed)
++        self.assertEqual(response_options[24], b'\x03e2e\x04test\x00')
++        if pd:
++            event = lab.packet(7, predicate=lambda e: bool(resources(e, 25)))
++            self.assertTrue(all(ipaddress.IPv6Network(p).subnet_of(ipaddress.IPv6Network('2001:db8:100::/48')) and valid > 0 for p, valid in resources(event, 25)))
++            lab.wait(lambda: lab.rows('prefixes'), description='delegated prefix committed to lease database')
++        lab.wait(lambda: lab.rows('leases'), description='address committed to lease database')
++        return lab, event
++
++    def test_address_and_options(self):
++        lab, event = self.acquire(pd=False)
++        if CLIENT != 'kea':
++            address = resources(event, 3)[0][0]
++            lab.wait(lambda: address in command('ip', '-j', '-6', 'addr', ns='client').stdout,
++                     description='client kernel address installation')
++
++    def test_address_and_prefix(self):
++        lab, _event = self.acquire()
++        lab.wait(lambda: Path('/work/routes.log').exists(), description='delegated-prefix route hook')
++        lab.wait(lambda: 'via fe80::' in command('ip', '-6', 'route', ns='server').stdout,
++                 description='delegated-prefix route installed in server kernel')
++
++    def test_rapid_commit(self):
++        if CLIENT == 'dhclient':
++            self.skipTest('adapter does not force Rapid Commit for this implementation')
++        lab, event = self.acquire(rapid=True)
++        self.assertIn(14, dict(tlvs(inner(event)[4:])))
++        self.assertFalse(any(inner(e)[0] in (2, 3) for e in lab.events()))
++
++    def test_renew(self):
++        lab, initial = self.acquire()
++        renewed = lab.packet(5, since=initial['time'] + .01)
++        reply = lab.packet(7, since=renewed['time'], predicate=lambda e: inner(e)[1:4] == inner(renewed)[1:4])
++        self.assertEqual(resources(initial, 25), resources(reply, 25))
++
++    def test_rebind_after_server_outage(self):
++        if CLIENT == 'kea':
++            self.skipTest('perfdhcp generates Renew/Release, not timer-driven Rebind')
++        lab, initial = self.acquire()
++        Lab.stop(lab.server)
++        rebind = lab.packet(6, since=initial['time'], timeout=40)
++        lab.start_server()
++        lab.packet(7, since=rebind['time'], predicate=lambda e: bool(resources(e, 25)))
++
++    def test_release(self):
++        if CLIENT == 'networkd':
++            self.skipTest('systemd 252 DHCPv6 client has no Release implementation')
++        if CLIENT == 'kea':
++            lab = self.lab_start()
++            lab.start_client(rates=True)
++            released = lab.packet(8)
++        else:
++            lab, _ = self.acquire()
++            lab.release()
++            released = lab.packet(8)
++        lab.packet(7, since=released['time'], predicate=lambda e: inner(e)[1:4] == inner(released)[1:4])
++        if CLIENT != 'kea':
++            lab.wait(lambda: not lab.rows('prefixes') and not lab.rows('leases'),
++                     description='released address and prefix inactive in database')
++            lab.wait(lambda: 'via fe80::' not in command('ip', '-6', 'route', ns='server').stdout,
++                     description='released delegated route removed from server kernel')
++
++    def test_server_restart_preserves_leases(self):
++        lab, initial = self.acquire()
++        # Stop client timers while checking persistence before any new exchange.
++        os.killpg(lab.client.pid, signal.SIGSTOP)
++        saved = {table: lab.rows(table) for table in ('leases', 'prefixes')}
++        Lab.stop(lab.server)
++        since = time.monotonic()
++        try:
++            lab.start_server()
++            self.assertEqual(saved, {table: lab.rows(table) for table in saved})
++        finally:
++            os.killpg(lab.client.pid, signal.SIGCONT)
++        event = lab.packet(7, since=since, predicate=lambda e: bool(resources(e, 25)))
++        self.assertEqual(resources(initial, 25), resources(event, 25))
++
++    def test_prefix_control_new_allocation(self):
++        lab, _ = self.acquire()
++        Lab.stop(lab.client)
++        lab.control('2001:db9')
++        # Start a fresh exchange: old active state must not mask the new prefix.
++        for path in ('/var/lib/dhcp/dhclient6.leases', '/var/lib/dhcpcd', '/var/lib/dhcpcd5'):
++            if Path(path).is_dir():
++                shutil.rmtree(path)
++            else:
++                Path(path).unlink(missing_ok=True)
++        since = time.monotonic()
++        lab.start_client()
++        reply = lab.packet(7, since=since, predicate=lambda e: any(a.startswith('2001:db9:') and v > 0 for a, v in resources(e, 3)))
++        self.assertTrue(any(p.startswith('2001:db9:') and v > 0 for p, v in resources(reply, 25)))
++
++    def test_authenticated_reconfigure(self):
++        if CLIENT != 'dhcpcd':
++            self.skipTest('authenticated Reconfigure tested with dhcpcd RKAP implementation')
++        lab = self.lab_start()
++        Lab.stop(lab.server)
++        lab.write_config(t1=120, t2=180, lifetime=240)
++        lab.start_server()
++        lab.start_client()
++        initial = lab.packet(7, predicate=lambda e: 11 in dict(tlvs(inner(e)[4:])))
++        key = dict(tlvs(inner(initial)[4:]))[11][12:]
++        since = time.monotonic()
++        lab.control('2001:db8')
++        event = lab.packet(10, since=since, timeout=8)
++        packet = inner(event)
++        auth = dict(tlvs(packet[4:]))[11]
++        self.assertEqual(auth[11], 2)
++        self.assertEqual(auth[12:], hmac.new(key, packet[:-16] + bytes(16), hashlib.md5).digest())
++        renew = lab.packet(5, since=event['time'], timeout=8)
++        lab.packet(7, since=renew['time'], predicate=lambda e: inner(e)[1:4] == inner(renew)[1:4])
++        self.assertLess(renew['time'] - since, 8)
++        # A newer counter with a bad HMAC and an exact replay must not renew.
++        time.sleep(.2)
++        tampered = bytearray(packet)
++        counter_offset = len(packet) - 28 + 3
++        tampered[counter_offset:counter_offset + 8] = (int.from_bytes(auth[3:11], 'big') + 1).to_bytes(8, 'big')
++        tampered[-1] ^= 1
++        since_bad = time.monotonic()
++        lab.inject(bytes(tampered))
++        lab.inject(packet)
++        time.sleep(2)
++        self.assertFalse(any(inner(e)[0] == 5 and e['time'] >= since_bad for e in lab.events()))
++        self.assertGreaterEqual((lab.directory / 'client.log').read_text().count('authentication failed'), 2)
++        Lab.stop(lab.server)
++        since = time.monotonic()
++        lab.start_server()
++        second = lab.packet(10, since=since, timeout=8)
++        self.assertGreater(int.from_bytes(dict(tlvs(inner(second)[4:]))[11][3:11], 'big'), int.from_bytes(auth[3:11], 'big'))
++        lab.packet(5, since=second['time'], timeout=8)
++
++    def test_live_prefix_renumber(self):
++        if CLIENT != 'dhcpcd':
++            self.skipTest('immediate live renumbering requires negotiated Reconfigure')
++        lab = self.lab_start()
++        Lab.stop(lab.server)
++        lab.write_config(t1=120, t2=180, lifetime=240)
++        config = Path('/work/server.conf')
++        config.write_text(config.read_text().replace('pattern = $prefix$:1::$range$', 'pattern = fd00:1::$range$'))
++        lab.start_server()
++        lab.start_client()
++        initial = lab.packet(7, predicate=lambda e: bool(resources(e, 25)))
++        since = time.monotonic()
++        lab.control('2001:db9')
++        reconfigure = lab.packet(10, since=since, timeout=8)
++        lab.packet(5, since=reconfigure['time'], timeout=8)
++        replacement = lab.packet(7, since=since, timeout=12, predicate=lambda e:
++            any(p.startswith('2001:db9:') and valid > 0 for p, valid in resources(e, 25)))
++        new_prefix = next(p for p, valid in resources(replacement, 25) if p.startswith('2001:db9:') and valid > 0)
++        lab.wait(lambda: new_prefix in command('ip', '-6', 'route', ns='client').stdout,
++                 description='client installs replacement delegated-prefix route')
++        lab.wait(lambda: 'fd00:1::100' in command('ip', '-j', '-6', 'addr', ns='client').stdout,
++                 description='stable client address remains installed')
++
++    def test_renew_restores_delegated_route(self):
++        if CLIENT != 'dhcpcd':
++            self.skipTest('immediate route recovery uses dhcpcd Reconfigure')
++        lab = self.lab_start()
++        Lab.stop(lab.server)
++        lab.write_config(t1=120, t2=180, lifetime=240)
++        lab.start_server()
++        lab.start_client()
++        initial = lab.packet(7, predicate=lambda e: bool(resources(e, 25)) and 11 in dict(tlvs(inner(e)[4:])))
++        prefix = resources(initial, 25)[0][0]
++        lab.wait(lambda: prefix in command('ip', '-6', 'route', ns='server').stdout, description='initial delegated route')
++        command('ip', '-6', 'route', 'del', prefix, ns='server')
++        since = time.monotonic()
++        lab.control('2001:db8')
++        trigger = lab.packet(10, since=since, timeout=8)
++        renew = lab.packet(5, since=trigger['time'], timeout=8)
++        lab.packet(7, since=renew['time'], predicate=lambda e: bool(resources(e, 25)))
++        try:
++            lab.wait(lambda: prefix in command('ip', '-6', 'route', ns='server').stdout, 3, 'route restoration after Renew')
++        except TimeoutError as error:
++            raise KnownGap('upstream Renew handler does not run the delegated-prefix route-up hook') from error
++
++    def test_kea_relay_forward(self):
++        if CLIENT != 'kea':
++            self.skipTest('Kea perfdhcp relay simulation case')
++        lab = self.lab_start()
++        lab.start_client(relay_sim=True)
++        lab.packet(12, timeout=8)
++        try:
++            lab.packet(7, timeout=5, predicate=lambda e: e['type'] == 13 and bool(resources(e, 25)))
++        except TimeoutError as error:
++            self.assertIsNone(lab.server.poll(), 'server crashed while processing relay traffic')
++            self.assertIsNone(lab.client.poll(), 'client exited during relay exchange')
++            if lab.relay_process is not None:
++                self.assertIsNone(lab.relay_process.poll(), 'ISC relay exited during exchange')
++            self.assertNotIn('Traceback', (lab.directory / 'server.log').read_text())
++            raise KnownGap('dhcpy6d does not implement DHCPv6 relay-forward processing') from error
++        self.fail('Relay now works: remove the documented known-gap expectation')
++
++    def test_isc_dhcrelay(self):
++        if CLIENT == 'kea':
++            self.skipTest('real relay case uses persistent clients; Kea relay simulation is separate')
++        lab = self.lab_start(relay=True)
++        lab.start_client()
++        lab.packet(12, timeout=12)
++        try:
++            lab.packet(7, timeout=5, predicate=lambda e: e['type'] == 13 and bool(resources(e, 25)))
++        except TimeoutError as error:
++            self.assertIsNone(lab.server.poll(), 'server crashed while processing relay traffic')
++            self.assertIsNone(lab.client.poll(), 'client exited during relay exchange')
++            if lab.relay_process is not None:
++                self.assertIsNone(lab.relay_process.poll(), 'ISC relay exited during exchange')
++            self.assertNotIn('Traceback', (lab.directory / 'server.log').read_text())
++            raise KnownGap('dhcpy6d does not implement DHCPv6 relay-forward processing') from error
++        self.fail('Relay now works: remove the documented known-gap expectation')
++
++
++class Report(unittest.TextTestResult):
++    def __init__(self, *args, **kwargs):
++        super().__init__(*args, **kwargs)
++        self.cases = []
++
++    def startTest(self, test):
++        super().startTest(test)
++        self.started = time.monotonic()
++
++    def addSuccess(self, test):
++        super().addSuccess(test)
++        self.record(test, None, '')
++
++    def addFailure(self, test, err):
++        super().addFailure(test, err)
++        self.record(test, 'failure', self._exc_info_to_string(err, test))
++
++    def addError(self, test, err):
++        if isinstance(err[1], KnownGap):
++            self.addExpectedFailure(test, err)
++            return
++        super().addError(test, err)
++        self.record(test, 'error', self._exc_info_to_string(err, test))
++
++    def addSkip(self, test, reason):
++        super().addSkip(test, reason)
++        self.record(test, 'skipped', reason)
++
++    def addExpectedFailure(self, test, err):
++        super().addExpectedFailure(test, err)
++        self.record(test, 'skipped', 'KNOWN UPSTREAM GAP: ' + str(err[1]) + '\n' + self._exc_info_to_string(err, test))
++
++    def addUnexpectedSuccess(self, test):
++        super().addUnexpectedSuccess(test)
++        self.record(test, 'failure', 'Known gap now passes: remove expectedFailure after review')
++
++    def record(self, test, status, detail):
++        case = ET.Element('testcase', name=test._testMethodName, classname=CLIENT, time=str(time.monotonic() - self.started))
++        if status:
++            ET.SubElement(case, status).text = detail
++        self.cases.append(case)
++
++
++if __name__ == '__main__':
++    parser = argparse.ArgumentParser()
++    parser.add_argument('--client', choices=['kea', 'dhclient', 'dhcpcd', 'networkd'], required=True)
++    parser.add_argument('--test', default='')
++    args = parser.parse_args()
++    CLIENT = args.client
++    ARTIFACTS.mkdir(parents=True, exist_ok=True)
++    versions = command('dpkg-query', '-W', 'isc-dhcp-client', 'isc-dhcp-relay', 'dhcpcd-base', 'kea-admin', 'systemd').stdout
++    (ARTIFACTS / ('versions-' + CLIENT + '.txt')).write_text(versions)
++    suite = unittest.defaultTestLoader.loadTestsFromTestCase(Interoperability)
++    if args.test:
++        suite = unittest.TestSuite(test for test in suite if args.test in test._testMethodName)
++    if suite.countTestCases() == 0:
++        parser.error('test filter matched no cases')
++    result = unittest.TextTestRunner(verbosity=2, resultclass=Report).run(suite)
++    xml = ET.Element('testsuite', name='dhcpy6d-' + CLIENT, tests=str(result.testsRun),
++        failures=str(len(result.failures) + len(result.unexpectedSuccesses)), errors=str(len(result.errors)),
++        skipped=str(len(result.skipped) + len(result.expectedFailures)))
++    xml.extend(result.cases)
++    ET.ElementTree(xml).write(ARTIFACTS / ('junit-' + CLIENT + '.xml'), encoding='utf-8', xml_declaration=True)
++    sys.exit(not result.wasSuccessful())
+--- /dev/null
++++ b/tests/packaging/Dockerfile
+@@ -0,0 +1,6 @@
++FROM debian:bookworm-slim
++ENV DEBIAN_FRONTEND=noninteractive
++RUN apt-get update && apt-get install -y --no-install-recommends \
++    adduser lsb-base python3 python3-distro python3-dnspython ucf systemd rpm \
++    && rm -rf /var/lib/apt/lists/*
++ENTRYPOINT []
+--- /dev/null
++++ b/tests/packaging/README.md
+@@ -0,0 +1,20 @@
++# Package installation checks
++
++Run in a disposable Linux Docker container; the script refuses to run outside
++Docker or without root. Build a Debian package first, then:
++
++```sh
++docker build -t dhcpy6d-packaging-check -f tests/packaging/Dockerfile .
++package="$(readlink -f ../dhcpy6d_$(dpkg-parsechangelog -SVersion)_all.deb)"
++docker run --rm --network none \
++  --mount "type=bind,src=$PWD,dst=/src,readonly" \
++  --mount "type=bind,src=$package,dst=/tmp/package.deb,readonly" \
++  dhcpy6d-packaging-check sh /src/tests/packaging/check-install.sh /tmp/package.deb
++```
++
++The test performs real Debian install, reinstall/upgrade and purge operations.
++It verifies private state ownership/mode, preserved state bytes and local config,
++the installed section-7 manual, and cleanup on purge. It also parses the RPM spec
++with `rpmspec` and executes the expanded `%post` scriptlet twice to check state
++preservation. This validates RPM scriptlet behavior, not a full RPM build/install.
++No service is started and no production state is mounted.
+--- /dev/null
++++ b/tests/packaging/check-install.sh
+@@ -0,0 +1,65 @@
++#!/bin/sh
++# Run only in a disposable rootful Docker container, with checkout at /src.
++set -eu
++[ -f /.dockerenv ] && [ "$(id -u)" = 0 ] || {
++    echo 'This installation test requires a disposable rootful Docker container.' >&2
++    exit 1
++}
++package=${1:?path to the built Debian package required}
++state=/var/lib/dhcpy6d/reconfigure.sqlite
++# Slim images normally discard manuals during dpkg installation.
++python3 - <<'PYCODE'
++from pathlib import Path
++for path in Path('/etc/dpkg/dpkg.cfg.d').glob('*'):
++    if path.is_file():
++        path.write_text(''.join(line for line in path.read_text().splitlines(keepends=True)
++            if not (line.startswith('path-exclude') and '/usr/share/man/' in line)))
++PYCODE
++
++# Verify the real Debian postinst, then upgrade with existing authentication data.
++dpkg -i "$package" >/tmp/install.log 2>&1 || { cat /tmp/install.log; exit 1; }
++[ "$(stat -c '%U:%G %a' "$state")" = 'dhcpy6d:dhcpy6d 600' ]
++python3 - <<'PY'
++import gzip
++import sqlite3
++with sqlite3.connect('/var/lib/dhcpy6d/reconfigure.sqlite') as db:
++    db.execute('CREATE TABLE preserved (value TEXT)')
++    db.execute("INSERT INTO preserved VALUES ('synthetic-key-and-replay-state')")
++with gzip.open('/usr/share/man/man7/dhcpy6d-reconfigure.7.gz', 'rt') as page:
++    assert '.TH "DHCPY6D-RECONFIGURE" "7"' in page.read()
++PY
++printf '\n# Locally maintained configuration\n' >> /etc/dhcpy6d.conf
++cp /etc/dhcpy6d.conf /tmp/config-before
++checksum=$(sha256sum "$state")
++dpkg -i "$package" >/tmp/upgrade.log 2>&1 || { cat /tmp/upgrade.log; exit 1; }
++[ "$(sha256sum "$state")" = "$checksum" ]
++[ "$(stat -c '%U:%G %a' "$state")" = 'dhcpy6d:dhcpy6d 600' ]
++cmp /etc/dhcpy6d.conf /tmp/config-before
++for suffix in -journal -wal -shm; do touch "$state$suffix"; done
++dpkg --purge dhcpy6d >/tmp/purge.log 2>&1 || { cat /tmp/purge.log; exit 1; }
++for suffix in '' -journal -wal -shm; do [ ! -e "$state$suffix" ]; done
++printf 'Debian install, upgrade preservation, manpage and purge passed\n'
++
++# Parse the actual RPM spec, then exercise its expanded %post for install/upgrade.
++rpmspec --parse --define 'python3_sitelib /usr/lib/python3/dist-packages' \
++    --define '_unitdir /lib/systemd/system' --define '__python3 /usr/bin/python3' \
++    --define 'py3_build python3 setup.py build' /src/redhat/dhcpy6d.spec >/tmp/rpm-expanded.spec
++python3 - <<'PY'
++from pathlib import Path
++text = Path('/tmp/rpm-expanded.spec').read_text()
++start = text.index('\n%post\n') + len('\n%post\n')
++end = text.index('\n%preun\n', start)
++Path('/tmp/rpm-post.sh').write_text(text[start:end])
++assert '%ghost %attr(0600,dhcpy6d,dhcpy6d) /var/lib/dhcpy6d/reconfigure.sqlite' in text
++PY
++install -D -m 0644 /src/scripts/setup-reconfigure-state /usr/share/dhcpy6d/setup-reconfigure-state
++sh -n /tmp/rpm-post.sh
++install -d -m 0770 -o dhcpy6d -g dhcpy6d /var/lib/dhcpy6d
++sh -e /tmp/rpm-post.sh 1
++[ "$(stat -c '%U:%G %a' "$state")" = 'dhcpy6d:dhcpy6d 600' ]
++printf 'preserve-existing-rpm-keys' > "$state"
++checksum=$(sha256sum "$state")
++sh -e /tmp/rpm-post.sh 2
++[ "$(sha256sum "$state")" = "$checksum" ]
++[ "$(stat -c '%U:%G %a' "$state")" = 'dhcpy6d:dhcpy6d 600' ]
++printf 'RPM spec parsing and install/upgrade scriptlets passed\n'
+--- a/tests/test_python311_compat.py
++++ b/tests/test_python311_compat.py
+@@ -192,3 +192,17 @@
+         store.cursor.close.assert_called_once_with()
+         store.connection.close.assert_called_once_with()
+         self.assertFalse(store.connected)
++
++
++class SQLiteImportOrderTest(unittest.TestCase):
++    def test_connects_when_sqlite_is_already_imported(self):
++        import sqlite3
++        from dhcpy6d.storage.sqlite import SQLite
++        from dhcpy6d.config import cfg
++        with mock.patch.object(cfg, 'STORE_SQLITE_CONFIG', ':memory:'):
++            store = SQLite(None, None, storage_type='config')
++            try:
++                self.assertTrue(store.connected)
++                self.assertEqual(store.db_query('SELECT 1'), [(1,)])
++            finally:
++                store.close()
+--- /dev/null
++++ b/tests/test_reconfigure.py
+@@ -0,0 +1,159 @@
++import hashlib
++import hmac
++import os
++import socket
++import struct
++import tempfile
++import unittest
++from types import SimpleNamespace
++from unittest.mock import Mock, patch
++
++from dhcpy6d.reconfigure import ReconfigureService, options
++
++
++def option(code, value):
++    return struct.pack('!HH', code, len(value)) + value
++
++
++def reply(valid=3600, status=0):
++    address = bytes.fromhex('20010db8000000000000000000000001')
++    ia = struct.pack('!III', 1, 900, 1800) + option(5, address + struct.pack('!II', valid, valid))
++    return b'\x07\x01\x02\x03' + option(3, ia) + option(13, struct.pack('!H', status))
++
++
++class TestReconfigure(unittest.TestCase):
++    def setUp(self):
++        self.directory = tempfile.TemporaryDirectory()
++        self.path = self.directory.name + '/state.sqlite'
++        self.now = 1000
++        self.sock = Mock()
++        self.service = self.create_service()
++        self.transaction = SimpleNamespace(duid='000100010102030405060708', interface='lan0',
++            client_llip='fe800000000000000000000000000002', options={20: ''},
++            last_message_received_type=3)
++
++    def tearDown(self):
++        self.service.close()
++        self.directory.cleanup()
++
++    def create_service(self, server='000100010a0b0c0d'):
++        return ReconfigureService(self.path, server, self.sock, ['lan0'], Mock(), clock=lambda: self.now)
++
++    def enroll(self):
++        return self.service.reply_options(self.transaction, reply())
++
++    def test_key_delivery_only_for_successful_opted_in_initial_reply(self):
++        for packet in (b'\x02\x01\x02\x03', reply(status=2), reply(valid=0)):
++            self.assertEqual(self.service.reply_options(self.transaction, packet), b'')
++        self.transaction.options = {}
++        self.assertEqual(self.enroll(), b'')
++        self.service.trigger()
++        self.service.poll()
++        self.sock.sendto.assert_not_called()
++        self.transaction.options = {20: ''}
++        opts = dict(options(self.enroll()))
++        self.assertEqual(opts[20], b'')
++        self.assertEqual(opts[11][:3], b'\x03\x01\x00')
++        self.assertEqual(opts[11][11], 1)
++        self.assertEqual(len(opts[11]), 28)
++        self.assertEqual(os.stat(self.path).st_mode & 0o777, 0o600)
++
++    @patch('socket.if_nametoindex', return_value=7)
++    def test_authenticated_packet_and_persisted_replay(self, _index):
++        key = dict(options(self.enroll()))[11][12:]
++        self.service.trigger()
++        self.service.poll()
++        packet, destination = self.sock.sendto.call_args.args
++        self.assertEqual(destination, ('fe80::2', 546, 0, 7))
++        self.assertEqual(packet[:4], b'\x0a\x00\x00\x00')
++        opts = dict(options(packet[4:]))
++        self.assertEqual(opts[1].hex(), self.transaction.duid)
++        self.assertEqual(opts[19], b'\x05')
++        self.assertEqual(opts[2].hex(), '000100010a0b0c0d')
++        self.assertEqual(opts[11][:3], b'\x03\x01\x00')
++        self.assertEqual(opts[11][11], 2)
++        self.assertEqual(opts[11][12:], hmac.new(key, packet[:-16] + bytes(16), hashlib.md5).digest())
++        replay = int.from_bytes(opts[11][3:11], 'big')
++        self.service.close()
++        self.service = self.create_service()
++        self.assertEqual(dict(options(self.enroll()))[11][12:], key)
++        self.service.trigger()
++        self.service.poll()
++        packet = self.sock.sendto.call_args.args[0]
++        self.assertGreater(int.from_bytes(dict(options(packet[4:]))[11][3:11], 'big'), replay)
++
++    @patch('socket.if_nametoindex', return_value=7)
++    def test_bounded_retries_and_successful_renew_acknowledges(self, _index):
++        self.enroll()
++        self.service.trigger()
++        self.service.poll()
++        self.service.poll()
++        self.assertEqual(self.sock.sendto.call_count, 1)
++        self.now += 3
++        self.service.poll()
++        self.assertEqual(self.sock.sendto.call_count, 2)
++        self.transaction.last_message_received_type = 5
++        self.service.reply_options(self.transaction, reply(status=2))
++        self.now += 5
++        self.service.poll()
++        self.assertEqual(self.sock.sendto.call_count, 3)
++        self.service.reply_options(self.transaction, reply())
++        self.now += 100
++        self.service.poll()
++        self.assertEqual(self.sock.sendto.call_count, 3)
++        self.service.trigger()
++        for _ in range(20):
++            self.service.poll()
++            self.now += 101
++        self.assertEqual(self.sock.sendto.call_count, 11)
++
++    def test_expiry_and_server_identity_isolation(self):
++        self.enroll()
++        self.now += 3601
++        self.service.trigger()
++        self.service.poll()
++        self.sock.sendto.assert_not_called()
++        self.now = 1000
++        self.service.close()
++        self.service = self.create_service(server='aabbccdd')
++        self.service.trigger()
++        self.service.poll()
++        self.sock.sendto.assert_not_called()
++
++    def test_non_link_local_and_unconfigured_interfaces_not_enrolled(self):
++        for attribute, value in [('interface', 'wan0'), ('client_llip', '20010db8000000000000000000000001')]:
++            original = getattr(self.transaction, attribute)
++            setattr(self.transaction, attribute, value)
++            self.assertEqual(self.enroll(), b'')
++            setattr(self.transaction, attribute, original)
++
++    def test_key_reply_replay_is_strictly_increasing(self):
++        first = dict(options(self.enroll()))[11]
++        second = dict(options(self.enroll()))[11]
++        self.assertEqual(first[12:], second[12:])
++        self.assertGreater(int.from_bytes(second[3:11], 'big'), int.from_bytes(first[3:11], 'big'))
++
++    def test_release_revokes_consent_and_pending_retries(self):
++        self.enroll()
++        self.service.trigger()
++        self.transaction.last_message_received_type = 8
++        self.service.reply_options(self.transaction, b'\x07\x01\x02\x03' + option(13, b'\x00\x00'))
++        self.service.trigger()
++        self.assertFalse(self.service.pending)
++
++    def test_failed_pd_with_live_na_does_not_acknowledge_renewal(self):
++        self.enroll()
++        self.service.trigger()
++        self.transaction.last_message_received_type = 5
++        for pd in (option(13, b'\x00\x06'), option(26, bytes(25))):
++            packet = reply() + option(25, struct.pack('!III', 1, 900, 1800) + pd)
++            self.assertEqual(self.service.reply_options(self.transaction, packet), b'')
++            self.assertTrue(self.service.pending)
++
++    def test_malformed_packet_is_rejected(self):
++        with self.assertRaises(ValueError):
++            list(options(b'\x00\x01\x00\x10\x00'))
++
++
++if __name__ == '__main__':
++    unittest.main()
+--- /dev/null
++++ b/tests/test_reconfigure_dhcpcd.py
+@@ -0,0 +1,48 @@
++"""Optional compatibility test using dhcpcd's actual auth.c implementation.
++
++See doc/reconfigure.rst for building DHCPCD_AUTH_CHECK from dhcpcd 9.4.1.
++"""
++import os
++from pathlib import Path
++import subprocess
++import tempfile
++import unittest
++from types import SimpleNamespace
++from unittest.mock import Mock, patch
++
++from dhcpy6d.reconfigure import ReconfigureService
++from tests.test_reconfigure import reply
++
++
++@unittest.skipUnless(os.environ.get('DHCPCD_AUTH_CHECK'), 'dhcpcd C authentication checker not configured')
++class TestDhcpcdAuthentication(unittest.TestCase):
++    def test_real_client_accepts_packets_and_rejects_replay_and_tampering(self):
++        with tempfile.TemporaryDirectory() as directory:
++            path = Path(directory)
++            sock = Mock()
++            transaction = SimpleNamespace(duid='00010001', interface='lan0',
++                client_llip='fe800000000000000000000000000002', options={20: ''},
++                last_message_received_type=3)
++            manager = ReconfigureService(str(path / 'state'), 'aabb', sock, ['lan0'], Mock())
++            try:
++                (path / 'reply1').write_bytes(reply() + manager.reply_options(transaction, reply()))
++                with patch('socket.if_nametoindex', return_value=7):
++                    manager.trigger()
++                    manager.poll()
++                    (path / 'reconf1').write_bytes(sock.sendto.call_args.args[0])
++                    manager.close()
++                    manager = ReconfigureService(str(path / 'state'), 'aabb', sock, ['lan0'], Mock())
++                    manager.trigger()
++                    manager.poll()
++                    packet = sock.sendto.call_args.args[0]
++                    (path / 'reconf2').write_bytes(packet)
++                    (path / 'tampered').write_bytes(packet[:-1] + bytes([packet[-1] ^ 1]))
++                    (path / 'reply2').write_bytes(reply() + manager.reply_options(transaction, reply()))
++                result = subprocess.run([os.environ['DHCPCD_AUTH_CHECK'],
++                    '+' + str(path / 'reply1'), '+' + str(path / 'reconf1'),
++                    '-' + str(path / 'reconf1'), '-' + str(path / 'tampered'),
++                    '+' + str(path / 'reconf2'), '+' + str(path / 'reply2')],
++                    capture_output=True, text=True)
++                self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
++            finally:
++                manager.close()
+--- /dev/null
++++ b/tests/test_reconfigure_handler.py
+@@ -0,0 +1,103 @@
++"""Exercise final Reply integration using the existing portable config fixture."""
++import binascii
++import importlib.util
++from contextlib import ExitStack
++from pathlib import Path
++import tempfile
++import unittest
++from types import SimpleNamespace
++from unittest.mock import Mock, patch
++
++from tests.test_prefix_substitution import cfg
++from dhcpy6d import handler, reconfigure
++from tests.test_reconfigure import option, options, reply
++
++
++class TestReconfigureHandler(unittest.TestCase):
++    def test_final_reply_contains_key_and_dry_run_does_not_enroll(self):
++        with tempfile.TemporaryDirectory() as directory:
++            sock = Mock()
++            manager = reconfigure.ReconfigureService(directory + '/state', 'aabb', sock, ['lan0'], Mock())
++            request = object.__new__(handler.RequestHandler)
++            request.socket = sock
++            request.client_address = ('fe80::2', 546, 0, 7)
++            client = SimpleNamespace(addresses=[object()], prefixes=[], get_options_string=lambda: '')
++            transaction = SimpleNamespace(answer='normal', duid='00010001', id='010203',
++                interface='lan0', client_llip='fe800000000000000000000000000002',
++                options={20: ''}, last_message_received_type=3, client=client)
++            ia = Mock()
++            ia.build.return_value = (reply()[4:].hex(), 3)
++            try:
++                with patch.object(reconfigure, 'service', manager), \
++                     patch.object(handler, 'OPTIONS', {3: ia}), \
++                     patch.object(handler, 'config_store', SimpleNamespace(connected=True)), \
++                     patch.object(handler, 'volatile_store', SimpleNamespace(connected=True)), \
++                     patch.object(cfg, 'SERVERDUID', 'aabb'), \
++                     patch.object(cfg, 'REALLY_DO_IT', False):
++                    request.build_response(7, transaction, [3])
++                    request.finish()
++                    manager.trigger()
++                    self.assertFalse(manager.pending)
++                    sock.sendto.assert_not_called()
++                    with patch.object(cfg, 'REALLY_DO_IT', True):
++                        request.build_response(7, transaction, [3])
++                        request.finish()
++                    packet = sock.sendto.call_args.args[0]
++                    self.assertEqual(dict(options(packet[4:]))[11][11], 1)
++                    self.assertEqual([code for code, _ in options(packet[4:])].count(20), 1)
++                    manager.trigger()
++                    self.assertTrue(manager.pending)
++            finally:
++                manager.close()
++
++    def test_prefix_control_triggers_only_after_configuration_update(self):
++        service = Mock()
++        address = Mock()
++        with patch.object(reconfigure, 'service', service), \
++             patch.object(cfg, 'ADDRESSES', {'dynamic': address}), \
++             patch.object(cfg, 'PREFIXES', {}), \
++             patch.object(cfg, 'PREFIX', ''), \
++             patch.object(handler, 'volatile_store', Mock()):
++            handler.RequestHandler.control_message(binascii.hexlify(b'prefix 20010db8'))
++            address.inject_dynamic_prefix_into_prototype.assert_called_once_with('20010db8')
++            service.trigger.assert_called_once()
++
++
++class TestReconfigureStartup(unittest.TestCase):
++    def test_startup_triggers_after_privilege_drop_and_skips_missing_prefix(self):
++        # Load the real entry point while isolating every OS/network side effect.
++        with patch.dict('sys.modules', {'distro': SimpleNamespace(id=lambda: 'test')}):
++            spec = importlib.util.spec_from_file_location('reconfigure_main_test', next(parent / 'main.py' for parent in Path(__file__).resolve().parents if (parent / 'main.py').is_file()))
++            main = importlib.util.module_from_spec(spec)
++            spec.loader.exec_module(main)
++        for prefix, enabled, expected in [('20010db8', True, True), ('', True, False), ('20010db8', False, False)]:
++            with self.subTest(prefix=prefix, enabled=enabled), ExitStack() as stack:
++                manager = Mock()
++                server = Mock()
++                server.serve_forever.side_effect = KeyboardInterrupt
++                stack.enter_context(patch.object(main, 'UDPMulticastIPv6', return_value=server))
++                for name in ('QueryQueue', 'TimerThread', 'RouteThread', 'TidyUpThread', 'DNSQueryThread', 'manage_prefixes_routes'):
++                    stack.enter_context(patch.object(main, name, Mock()))
++                stack.enter_context(patch.object(main, 'config_store', Mock()))
++                store = Mock()
++                store.get_dynamic_prefix.return_value = None
++                stack.enter_context(patch.object(main, 'volatile_store', store))
++                dropped = []
++                stack.enter_context(patch.object(main.os, 'setgid', lambda value: dropped.append('gid')))
++                stack.enter_context(patch.object(main.os, 'setuid', lambda value: dropped.append('uid')))
++                stack.enter_context(patch.object(main.pwd, 'getpwnam', return_value=SimpleNamespace(pw_uid=123)))
++                stack.enter_context(patch.object(main.grp, 'getgrnam', return_value=SimpleNamespace(gr_gid=123)))
++                for name, value in {'PREFIX': prefix, 'ADDRESSES': {'dynamic': SimpleNamespace(PATTERN='$prefix$::1', inject_dynamic_prefix_into_prototype=Mock())},
++                                    'PREFIXES': {}, 'RECONFIGURE_STATE_FILE': '/unused', 'REALLY_DO_IT': enabled}.items():
++                    stack.enter_context(patch.object(cfg, name, value))
++                stack.enter_context(patch.object(reconfigure, 'service', None))
++                def create(*args):
++                    self.assertEqual(dropped, ['gid', 'uid'])
++                    return manager
++                factory = stack.enter_context(patch.object(reconfigure, 'ReconfigureService', side_effect=create))
++                with self.assertRaises(SystemExit):
++                    main.run()
++                self.assertEqual(factory.called, enabled)
++                self.assertEqual(manager.trigger.called, expected)
++                self.assertEqual(manager.start.called, enabled)
++                self.assertEqual(manager.close.called, enabled)
+--- /dev/null
++++ b/tests/test_reconfigure_setup.py
+@@ -0,0 +1,85 @@
++import grp
++import os
++from pathlib import Path
++import pwd
++import stat
++import sys
++import runpy
++from unittest import mock
++import subprocess
++import tempfile
++import unittest
++
++
++ROOT = next(parent for parent in Path(__file__).resolve().parents if (parent / 'main.py').is_file())
++HELPER = ROOT / 'scripts/setup-reconfigure-state'
++
++
++class ReconfigureSetupTest(unittest.TestCase):
++    def setUp(self):
++        self.temporary = tempfile.TemporaryDirectory()
++        self.addCleanup(self.temporary.cleanup)
++        self.directory = Path(self.temporary.name) / 'state'
++        self.user = pwd.getpwuid(os.getuid()).pw_name
++        self.group = grp.getgrgid(os.getgid()).gr_name
++
++    def setup_state(self):
++        return subprocess.run([sys.executable, str(HELPER), str(self.directory), self.user, self.group],
++                              capture_output=True, text=True)
++
++    def test_creates_private_state_and_preserves_keys_on_upgrade(self):
++        result = self.setup_state()
++        self.assertEqual(result.returncode, 0, result.stderr)
++        state = self.directory / 'reconfigure.sqlite'
++        self.assertEqual(stat.S_IMODE(state.stat().st_mode), 0o600)
++        self.assertEqual(stat.S_IMODE(self.directory.stat().st_mode), 0o770)
++        self.assertEqual(state.stat().st_uid, os.getuid())
++        state.write_bytes(b'existing-keys-and-replay-counter')
++        state.chmod(0o644)
++        other = self.directory / 'volatile.sqlite'
++        other.write_bytes(b'existing-leases')
++        other.chmod(0o640)
++        result = self.setup_state()
++        self.assertEqual(result.returncode, 0, result.stderr)
++        self.assertEqual(state.read_bytes(), b'existing-keys-and-replay-counter')
++        self.assertEqual(stat.S_IMODE(state.stat().st_mode), 0o600)
++        self.assertEqual(other.read_bytes(), b'existing-leases')
++        self.assertEqual(stat.S_IMODE(other.stat().st_mode), 0o640)
++
++    def test_refuses_symlink_without_modifying_target(self):
++        self.directory.mkdir()
++        target = Path(self.temporary.name) / 'outside'
++        target.write_bytes(b'keep-me')
++        target.chmod(0o644)
++        (self.directory / 'reconfigure.sqlite').symlink_to(target)
++        result = self.setup_state()
++        self.assertNotEqual(result.returncode, 0)
++        self.assertIn('regular file', result.stderr)
++        self.assertEqual(target.read_bytes(), b'keep-me')
++        self.assertEqual(stat.S_IMODE(target.stat().st_mode), 0o644)
++
++    def test_refuses_non_regular_state(self):
++        (self.directory / 'reconfigure.sqlite').mkdir(parents=True)
++        self.assertNotEqual(self.setup_state().returncode, 0)
++        self.assertTrue((self.directory / 'reconfigure.sqlite').is_dir())
++
++
++    def test_path_replacement_cannot_change_an_outside_file(self):
++        namespace = runpy.run_path(str(HELPER))
++        original_chown = os.fchown
++        outside = Path(self.temporary.name) / 'outside'
++        outside.write_bytes(b'keep-outside-private-state')
++        outside.chmod(0o644)
++        attacked = []
++        def replace_path(fd, uid, gid):
++            if stat.S_ISREG(os.fstat(fd).st_mode) and not attacked:
++                state = self.directory / 'reconfigure.sqlite'
++                state.unlink()
++                state.symlink_to(outside)
++                attacked.append(True)
++            return original_chown(fd, uid, gid)
++        with mock.patch('os.fchown', side_effect=replace_path):
++            namespace['prepare_state'](str(self.directory), self.user, self.group)
++        self.assertTrue(attacked)
++        self.assertEqual(outside.read_bytes(), b'keep-outside-private-state')
++        self.assertEqual(stat.S_IMODE(outside.stat().st_mode), 0o644)
+--- a/tests/test_storage.py
++++ b/tests/test_storage.py
+@@ -212,3 +212,29 @@
+
+         self.assertEqual(result, 'INSERT_ERROR')
+         self.assertEqual(store.cursor.execute('SELECT * FROM leases').fetchall(), [])
++
++
++class SQLiteColdStartTest(unittest.TestCase):
++    def test_fresh_schema_is_committed_before_first_batch(self):
++        import sqlite3
++        with tempfile.TemporaryDirectory() as directory:
++            filename = os.path.join(directory, 'leases.sqlite')
++            store = object.__new__(SQLite)
++            store.db_module = sqlite3
++            store.connection = sqlite3.connect(filename)
++            store.cursor = store.connection.cursor()
++            store.db_connect = lambda: False
++            store.SCHEMAS = {
++                'meta': 'CREATE TABLE meta (item_key TEXT PRIMARY KEY, item_value TEXT)',
++                'leases': 'CREATE TABLE leases (address TEXT PRIMARY KEY)',
++            }
++            try:
++                store.create_tables()
++                self.assertFalse(store.connection.in_transaction)
++                self.assertEqual(store.db_query(("INSERT INTO leases VALUES ('2001:db8::1')",)), [])
++                with sqlite3.connect(filename) as observer:
++                    self.assertEqual(observer.execute('SELECT address FROM leases').fetchall(), [('2001:db8::1',)])
++                    self.assertEqual(observer.execute("SELECT item_value FROM meta WHERE item_key='version'").fetchone(),
++                                     (str(store.VOLATILE_SCHEMA_VERSION),))
++            finally:
++                store.close()

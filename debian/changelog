@@ -1,3 +1,17 @@
+dhcpy6d (1.7.0-1+stsblnmu5) UNRELEASED; urgency=medium
+
+  * Add opt-in authenticated DHCPv6 Reconfigure after startup and prefix
+    updates, with persistent client keys and replay protection.
+  * Fix SQLite backend initialization when sqlite3 was already imported and
+    commit freshly created schemas before the first asynchronous lease batch.
+  * Add Docker interoperability coverage for Kea perfdhcp, ISC dhclient,
+    dhcpcd, systemd-networkd and ISC dhcrelay, with GitHub Actions artifacts.
+  * Ship dhcpy6d-reconfigure(7) and prepare private persistent authentication
+    state in Debian and RPM installation scripts, preserving keys on upgrades.
+    Keep Reconfigure opt-in and existing configurations unchanged.
+
+ -- Felix Jacobi <felix.jacobi@iserv.eu>  Wed, 28 Oct 2026 22:13:12 +0100
+
 dhcpy6d (1.7.0-1+stsblnmu4) UNRELEASED; urgency=medium
 
   * Restore delegated-prefix route hooks after RENEW and REBIND replies.

@@ -1,5 +1,19 @@
-Authenticated client renewal
-===========================
+===================
+dhcpy6d-reconfigure
+===================
+
+-------------------------------------
+Authenticated DHCPv6 client renewal
+-------------------------------------
+
+:Author: Felix Jacobi
+:Date: 2026-10-28
+:Version: 1.7.0
+:Manual section: 7
+:Manual group: System administration
+
+DESCRIPTION
+===========
 
 DHCPy6d can send DHCPv6 Reconfigure messages requesting an immediate Renew
 (RFC 8415 sections 19 and 20.4). This is opt-in on the server::
@@ -13,13 +27,22 @@ keys. Keep it across restarts and lease-database cleanup. It is independent of
 the configured lease backend. An empty setting (the default) disables this
 feature. Dry-run mode does not open authentication state or send Reconfigure.
 
+Debian and RPM package installation prepares the private state file with daemon
+ownership and mode 0600. Upgrades preserve existing keys and counters. This setup
+does not enable the feature or modify existing local configurations; enable it
+explicitly with the setting above.
+
 A client must include Reconfigure Accept in its initial Request or Rapid Commit
 exchange. DHCPy6d then supplies a random 128-bit per-client/interface key in the
 successful Reply. Existing clients need a new initial exchange before they can
 be notified; their already-running leases cannot be enrolled retroactively.
 For dhcpcd 9.4.1, explicitly enable acceptance with::
 
+    option dhcp6_name_servers, dhcp6_domain_search, dhcp6_rapid_commit
     option dhcp6_reconfigure_accept
+
+Explicit DHCPv6 options disable dhcpcd's automatic IPv4 option mapping; retain
+the DNS, domain-search and Rapid Commit requests above as needed.
 
 Keep authentication enabled: do not add ``noauthrequired``. dhcpcd already
 implements RKAP; no client source patch or shared secret configuration is needed.
@@ -67,3 +90,8 @@ Then run in the DHCPy6d checkout::
 
     DHCPCD_AUTH_CHECK=/tmp/dhcpcd-auth-check \
         python3 -m unittest tests.test_reconfigure_dhcpcd -v
+
+SEE ALSO
+========
+
+**dhcpy6d(8)**, **dhcpy6d.conf(5)**, **dhcpcd.conf(5)**

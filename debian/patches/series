@@ -4,3 +4,4 @@ stsbl-pidfile-module.patch
 stsbl-nmu3-fixed-prefix-renew.patch
 stsbl-nmu4-renew-route-hook.patch
 stsbl-nmu4-fixed-prefix-test-isolation.patch
+stsbl-nmu5-authenticated-reconfigure.patch

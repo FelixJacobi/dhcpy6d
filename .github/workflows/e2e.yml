@@ -34,3 +34,31 @@ jobs:
           path: e2e-artifacts/
           if-no-files-found: error
           retention-days: 14
+
+  packaging:
+    name: Package installation
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install Debian build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y debhelper dh-python fakeroot python3-all python3-setuptools python3-docutils
+      - name: Build Debian package and manual
+        # Git checkouts already contain applied downstream patches. Test the
+        # checked-out binary without trying to reapply a quilt source series.
+        run: |
+          debian/rules clean
+          debian/rules build
+          fakeroot debian/rules binary
+      - name: Build isolated installation-check image
+        run: docker build -t dhcpy6d-packaging-check -f tests/packaging/Dockerfile .
+      - name: Check Debian install/upgrade/purge and RPM scriptlets
+        run: |
+          version="$(dpkg-parsechangelog -SVersion)"
+          package="$(readlink -f "../dhcpy6d_${version#*:}_all.deb")"
+          docker run --rm --network none \
+            --mount "type=bind,src=$PWD,dst=/src,readonly" \
+            --mount "type=bind,src=$package,dst=/tmp/package.deb,readonly" \
+            dhcpy6d-packaging-check sh /src/tests/packaging/check-install.sh /tmp/package.deb

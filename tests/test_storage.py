@@ -212,3 +212,29 @@ class VolatileStoreBatchTest(unittest.TestCase):
 
         self.assertEqual(result, 'INSERT_ERROR')
         self.assertEqual(store.cursor.execute('SELECT * FROM leases').fetchall(), [])
+
+
+class SQLiteColdStartTest(unittest.TestCase):
+    def test_fresh_schema_is_committed_before_first_batch(self):
+        import sqlite3
+        with tempfile.TemporaryDirectory() as directory:
+            filename = os.path.join(directory, 'leases.sqlite')
+            store = object.__new__(SQLite)
+            store.db_module = sqlite3
+            store.connection = sqlite3.connect(filename)
+            store.cursor = store.connection.cursor()
+            store.db_connect = lambda: False
+            store.SCHEMAS = {
+                'meta': 'CREATE TABLE meta (item_key TEXT PRIMARY KEY, item_value TEXT)',
+                'leases': 'CREATE TABLE leases (address TEXT PRIMARY KEY)',
+            }
+            try:
+                store.create_tables()
+                self.assertFalse(store.connection.in_transaction)
+                self.assertEqual(store.db_query(("INSERT INTO leases VALUES ('2001:db8::1')",)), [])
+                with sqlite3.connect(filename) as observer:
+                    self.assertEqual(observer.execute('SELECT address FROM leases').fetchall(), [('2001:db8::1',)])
+                    self.assertEqual(observer.execute("SELECT item_value FROM meta WHERE item_key='version'").fetchone(),
+                                     (str(store.VOLATILE_SCHEMA_VERSION),))
+            finally:
+                store.close()
