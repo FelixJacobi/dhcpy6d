@@ -31,3 +31,4 @@ debian/dhcpy6d/
 e2e-artifacts/
 
 man/man7/*.7
+/mac-test-artifacts/

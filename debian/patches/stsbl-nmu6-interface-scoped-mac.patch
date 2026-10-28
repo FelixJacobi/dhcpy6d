@@ -1,0 +1,770 @@
+Description: Scope neighbour MAC mappings and transactions by interface
+ Link-local IPv6 addresses are scoped to a link. Distinguish clients sharing
+ an address on separate interfaces, persist that scope, and cover the case
+ with real kernel NDP/DHCPv6 integration tests and CI artifacts.
+Author: Felix Jacobi <felix.jacobi@iserv.eu>
+Origin: other, https://github.com/HenriWahl/dhcpy6d/pull/83
+Last-Update: 2026-10-29
+
+--- a/.github/workflows/test.yml
++++ b/.github/workflows/test.yml
+@@ -15,3 +15,15 @@
+           python-version: '3.11'
+       - name: Run all unit tests
+         run: python -m unittest discover -s tests -p "test_*.py" -v
++
++  interface-mac-integration:
++    runs-on: ubuntu-latest
++    steps:
++      - uses: actions/checkout@v4
++      - name: Exercise duplicate link-local addresses on separate links
++        run: scripts/test-mac-integration.sh
++      - uses: actions/upload-artifact@v4
++        if: always()
++        with:
++          name: interface-mac-evidence
++          path: mac-test-artifacts/
+--- a/.gitignore
++++ b/.gitignore
+@@ -31,3 +31,4 @@
+ e2e-artifacts/
+
+ man/man7/*.7
++/mac-test-artifacts/
+--- a/dhcpy6d/globals.py
++++ b/dhcpy6d/globals.py
+@@ -67,9 +67,10 @@
+ # global time variable, synchronized by TimerThread
+ timer = Timer()
+
+-# dictionary to store transactions - key is transaction ID, value a transaction object
++# Transactions are keyed by (interface, expanded link-local IP, transaction ID).
+ transactions = {}
+ # collected MAC addresses from clients, mapping to link local IPs
++# Neighbour identity is (interface name, expanded link-local address).
+ collected_macs = {}
+
+ # queues for queries
+--- a/dhcpy6d/handler.py
++++ b/dhcpy6d/handler.py
+@@ -86,28 +86,30 @@
+             # even if 'lo' has the index 1
+             interface = ''
+
++        client_key = (interface, decompress_ip6(client_address))
++
+         # avoid processing requests of unknown clients which cannot be found in the neighbor cache table
+         # only makes sense if classes are not ignored and thus the neighbor cache is used
+         if not cfg.IGNORE_MAC and cfg.IGNORE_UNKNOWN_CLIENTS:
+-            if client_address in requests_blacklist:
++            if client_key in requests_blacklist:
+                 return False
+
+         # check if we are limiting requests
+         if cfg.REQUEST_LIMIT:
+             if cfg.REQUEST_LIMIT_IDENTIFICATION == 'llip':
+                 # avoid further processing if client is known to be bad
+-                if client_address in requests_blacklist:
++                if client_key in requests_blacklist:
+                     return False
+                 # add client to requests tracker if not known, otherwise raise counter
+-                if client_address not in requests:
+-                    requests[client_address] = Request(client_address)
++                if client_key not in requests:
++                    requests[client_key] = Request(client_key)
+                 else:
+-                    requests[client_address].count += 1
++                    requests[client_key].count += 1
+             # otherwise a MAC address
+             else:
+                 llip = decompress_ip6(client_address)
+-                if llip in collected_macs:
+-                    mac = deepcopy(collected_macs[llip].mac)
++                if (interface, llip) in collected_macs:
++                    mac = deepcopy(collected_macs[(interface, llip)].mac)
+                     if mac in requests_blacklist:
+                         return False
+                     # add client to requests tracker if not known, otherwise raise counter
+@@ -173,7 +175,7 @@
+                 if message_type in CONST.MESSAGE_DICT:
+                     client_llip = decompress_ip6(client_address)
+                     # 2. create Transaction object if not yet done
+-                    identifier = client_llip + transaction_id
++                    identifier = (interface, client_llip, transaction_id)
+                     if identifier not in transactions:
+                         transactions[identifier] = Transaction(transaction_id,
+                                                                client_llip,
+@@ -183,8 +185,8 @@
+                         # shortcut to transactions[identifier]
+                         transaction = transactions[identifier]
+                         # add client MAC address to transaction object
+-                        if transaction.client_llip in collected_macs and not cfg.IGNORE_MAC:
+-                            transaction.mac = collected_macs[transaction.client_llip].mac
++                        if (transaction.interface, transaction.client_llip) in collected_macs and not cfg.IGNORE_MAC:
++                            transaction.mac = collected_macs[(transaction.interface, transaction.client_llip)].mac
+                     else:
+                         # shortcut to transactions[identifier]
+                         transaction = transactions[identifier]
+@@ -206,14 +208,14 @@
+                             transaction.counter = 0
+                         else:
+                             # client will get answer if its LLIP & MAC is known
+-                            if transaction.client_llip not in collected_macs:
++                            if (transaction.interface, transaction.client_llip) not in collected_macs:
+                                 if not cfg.IGNORE_MAC:
+                                     # complete MAC collection - will make most sense on Linux
+                                     # and its native neighborcache access
+                                     collect_macs(timer.time)
+
+                                     # when still no trace of the client in neighbor cache then send silly signal back
+-                                    if transaction.client_llip not in collected_macs:
++                                    if (transaction.interface, transaction.client_llip) not in collected_macs:
+                                         # if not known send status code option failure to get
+                                         # LLIP/MAC mapping from neighbor cache
+                                         # status code 'Success' sounds silly but works best
+@@ -224,16 +226,16 @@
+                                         # complete MAC collection
+                                         collect_macs(timer.time)
+                                         # if client cannot be found in collected MACs
+-                                        if transaction.client_llip not in collected_macs:
+-                                            if cfg.IGNORE_UNKNOWN_CLIENTS and client_address in requests:
+-                                                if requests[client_address].count > 1:
+-                                                    requests_blacklist[client_address] = Request(client_address)
++                                        if (transaction.interface, transaction.client_llip) not in collected_macs:
++                                            if cfg.IGNORE_UNKNOWN_CLIENTS and client_key in requests:
++                                                if requests[client_key].count > 1:
++                                                    requests_blacklist[client_key] = Request(client_key)
+                                                     log.info(f"Blacklisting unknown client {client_address}")
+                                                     return False
+
+                                     # try to add client MAC address to transaction object
+                                     try:
+-                                        transaction.mac = collected_macs[transaction.client_llip].mac
++                                        transaction.mac = collected_macs[(transaction.interface, transaction.client_llip)].mac
+                                     except KeyError:
+                                         # MAC not yet found :-(
+                                         if cfg.LOG_MAC_LLIP:
+@@ -242,10 +244,10 @@
+
+                             # if finally there is some info about the client or MACs
+                             # it plays no role try to answer the request
+-                            if transaction.client_llip in collected_macs or cfg.IGNORE_MAC:
++                            if (transaction.interface, transaction.client_llip) in collected_macs or cfg.IGNORE_MAC:
+                                 if not cfg.IGNORE_MAC:
+                                     if transaction.mac == DUMMY_MAC:
+-                                        transaction.mac = collected_macs[transaction.client_llip].mac
++                                        transaction.mac = collected_macs[(transaction.interface, transaction.client_llip)].mac
+
+                                 # ADVERTISE
+                                 # if last request was a SOLICIT send an ADVERTISE (type 2) back
+--- a/dhcpy6d/helpers.py
++++ b/dhcpy6d/helpers.py
+@@ -50,7 +50,7 @@
+ class NeighborCacheRecord:
+     """
+     object for neighbor cache entries to be returned by get_neighbor_cache_linux() and in CollectedMACs
+-    .interface is only interesting for real neighbor cache records, to be ignored for collected MACs stored in DB
++    .interface scopes the link-local address, including persisted mappings.
+     """
+
+     def __init__(self, llip='', mac='', interface='', now=0):
+--- a/dhcpy6d/macs.py
++++ b/dhcpy6d/macs.py
+@@ -205,7 +205,7 @@
+                                                      mac=nda['NDA_LLADDR'],
+                                                      interface=if_number[nda['NDM_IFINDEX']],
+                                                      now=now)
+-                        result[record.llip] = record
++                        result[(record.interface, record.llip)] = record
+
+             # move to next record
+             answer_pos += nlmsg_len
+@@ -220,50 +220,40 @@
+     return result
+
+
++def remember_neighbor(record):
++    """Keep one MAC per interface-scoped neighbour, refreshing replacements."""
++    if not record.llip.startswith('fe80'):
++        return
++    key = (record.interface, record.llip)
++    old = collected_macs.get(key)
++    if old is not None and old.mac == record.mac:
++        return
++    collected_macs[key] = record
++    if cfg.LOG_MAC_LLIP:
++        log.info(f'collected mac {record.mac} for llip {colonify_ip6(record.llip)}%{record.interface}')
++    if cfg.CACHE_MAC_LLIP:
++        volatile_store.store_mac_llip(record.mac, record.llip, record.timestamp, record.interface)
++
++
+ def collect_macs(now):
+-    """
+-    collect MAC address from clients to link local addresses with MACs
+-    if a client has a new MAC the LLIP changes - with privacy extension enabled anyway
+-    calls local ip command to get neighbor cache - any more sophisticated idea is welcome!
+-
+-    The Linux netlink method is considered stable now.
+-    """
++    """Learn neighbours without merging identical link-local IPs on different links."""
+     try:
+-        # Linux can use kernel neighbor cache
+         if OS == 'Linux':
+-            for host in list(get_neighbor_cache_linux(IF_NUMBER, timer.time).values()):
+-                if host.llip not in collected_macs:
+-                    if host.llip.startswith('fe80'):
+-                        collected_macs[host.llip] = host
+-                        if cfg.LOG_MAC_LLIP:
+-                            log.info(f'collected mac {host.mac} for llip {colonify_ip6(host.llip)}')
+-                        if cfg.CACHE_MAC_LLIP:
+-                            volatile_store.store_mac_llip(host.mac, host.llip, timer.time)
++            for host in get_neighbor_cache_linux(IF_NUMBER, now).values():
++                remember_neighbor(host)
+         else:
+-            # subject to change - other distros might have other paths - might become a task
+-            # for a setup routine to find appropriate paths
+             for host in subprocess.getoutput(NC[OS]['call']).splitlines():
+-                # get fragments of output line
+                 frags = shlex.split(host)
+-                if frags[NC[OS]['dev']] in cfg.INTERFACE and len(frags) >= NC[OS]['len']:
+-                    # get rid of %interface
+-                    frags[NC[OS]['llip']] = decompress_ip6(frags[NC[OS]['llip']].split('%')[0])
+-                    if frags[NC[OS]['mac']] == '(incomplete)':
+-                        continue
+-                    # correct maybe shortened MAC
+-                    frags[NC[OS]['mac']] = correct_mac(frags[NC[OS]['mac']])
+-                    # put non yet existing LLIPs into dictionary - if they have MACs
+-                    if not frags[NC[OS]['llip']] in collected_macs and \
+-                       frags[NC[OS]['llip']].lower().startswith('fe80') and \
+-                       ':' in frags[NC[OS]['mac']]:
+-                        collected_macs[frags[NC[OS]['llip']]] = NeighborCacheRecord(llip=frags[NC[OS]['llip']],
+-                                                                                    mac=frags[NC[OS]['mac']],
+-                                                                                    interface=frags[NC[OS]['dev']],
+-                                                                                    now=now)
+-                        if cfg.LOG_MAC_LLIP:
+-                            log.info(f"collected mac {frags[NC[OS]['mac']]} for "
+-                                     f"llip {colonify_ip6(frags[NC[OS]['llip']])}")
+-                        volatile_store.store_mac_llip(frags[NC[OS]['mac']], frags[NC[OS]['llip']], timer.time)
++                if len(frags) < NC[OS]['len'] or frags[NC[OS]['dev']] not in cfg.INTERFACE:
++                    continue
++                if frags[NC[OS]['mac']] == '(incomplete)':
++                    continue
++                mac = correct_mac(frags[NC[OS]['mac']])
++                if ':' not in mac:
++                    continue
++                remember_neighbor(NeighborCacheRecord(
++                    llip=decompress_ip6(frags[NC[OS]['llip']].split('%')[0]),
++                    mac=mac, interface=frags[NC[OS]['dev']], now=now))
+     except Exception as err:
+         traceback.print_exc(file=sys.stdout)
+         sys.stdout.flush()
+--- a/dhcpy6d/options/option_25.py
++++ b/dhcpy6d/options/option_25.py
+@@ -39,7 +39,7 @@
+         options_answer_part = None
+
+         # check if MAC of LLIP is really known
+-        if transaction.client_llip in collected_macs or cfg.IGNORE_MAC:
++        if (transaction.interface, transaction.client_llip) in collected_macs or cfg.IGNORE_MAC:
+             # collect client information
+             if transaction.client is None:
+                 transaction.client = Client(transaction)
+--- a/dhcpy6d/options/option_3.py
++++ b/dhcpy6d/options/option_3.py
+@@ -38,7 +38,7 @@
+         options_answer_part = None
+
+         # check if MAC of LLIP is really known
+-        if transaction.client_llip in collected_macs or cfg.IGNORE_MAC:
++        if (transaction.interface, transaction.client_llip) in collected_macs or cfg.IGNORE_MAC:
+             # collect client information
+             if transaction.client is None:
+                 transaction.client = Client(transaction)
+--- a/dhcpy6d/options/option_4.py
++++ b/dhcpy6d/options/option_4.py
+@@ -38,7 +38,7 @@
+         options_answer_part = None
+
+         # check if MAC of LLIP is really known
+-        if transaction.client_llip in collected_macs or cfg.IGNORE_MAC:
++        if (transaction.interface, transaction.client_llip) in collected_macs or cfg.IGNORE_MAC:
+             # collect client information
+             if transaction.client is None:
+                 transaction.client = Client(transaction)
+--- a/dhcpy6d/storage/schemas.py
++++ b/dhcpy6d/storage/schemas.py
+@@ -56,7 +56,8 @@
+                         mac varchar(17) NOT NULL,
+                         link_local_ip varchar(39) NOT NULL,
+                         last_update bigint NOT NULL,
+-                        PRIMARY KEY (mac)
++                        interface varchar(64) NOT NULL,
++                        PRIMARY KEY (interface, link_local_ip)
+                         );
+                         '''
+ MYSQL_SQLITE['prefixes'] = '''
+@@ -126,7 +127,8 @@
+                                 mac varchar(17) NOT NULL,
+                                 link_local_ip varchar(39) NOT NULL,
+                                 last_update bigint NOT NULL,
+-                                PRIMARY KEY (mac)
++                                interface varchar(64) NOT NULL,
++                                PRIMARY KEY (interface, link_local_ip)
+                                 );
+                                 '''
+ POSTGRESQL_SCHEMA['prefixes'] = '''
+@@ -381,3 +383,11 @@
+
+         # All OK
+         print("Table 'routes' is OK")
++
++    # Legacy mappings have no interface and cannot safely identify a neighbour.
++    # Rebuild only this disposable cache; leases and prefix routes are retained.
++    if int(db.get_db_version()) < 4:
++        db.query('DROP TABLE IF EXISTS macs_llips')
++        db.query(db.SCHEMAS['macs_llips'])
++        db.query("UPDATE meta SET item_value='4' WHERE item_key='version'")
++        print("Rebuilt interface-scoped MAC/link-local cache (schema 4)")
+--- a/dhcpy6d/storage/store.py
++++ b/dhcpy6d/storage/store.py
+@@ -113,7 +113,7 @@
+     QUERY_TABLES = ''
+
+     # increasing number of SQL schema versions for storage of volatile data
+-    VOLATILE_SCHEMA_VERSION = 3
++    VOLATILE_SCHEMA_VERSION = 4
+
+     # supported versions of client config database schemas
+     CONFIG_SCHEMA_VERSIONS = [1, 2]
+@@ -986,20 +986,16 @@
+                             mac=mac,
+                             host_id=host_id)
+
+-    def store_mac_llip(self, mac, link_local_ip, now):
+-        """
+-            store MAC-link-local-ip-mapping
+-        """
+-        query = f"SELECT mac FROM macs_llips WHERE mac='{mac}'"
+-        db_entry = self.query(query)
+-        # if known already update timestamp of MAC-link-local-ip-mapping
+-        if not db_entry or db_entry == []:
+-            query = f"INSERT INTO macs_llips (mac, link_local_ip, last_update) " \
+-                    f"VALUES ('{mac}', '{link_local_ip}', '{now}')"
+-            self.query(query)
+-        else:
+-            query = f"UPDATE macs_llips SET link_local_ip = '{link_local_ip}', last_update = '{now}' WHERE mac = '{mac}'"
+-            self.query(query)
++    def store_mac_llip(self, mac, link_local_ip, now, interface):
++        """Persist a neighbour mapping within its receiving interface."""
++        # Values are learned from the kernel; escape interface names for SQL.
++        interface = interface.replace("'", "''")
++        scope = f"interface='{interface}' AND link_local_ip='{link_local_ip}'"
++        if not self.query(f"SELECT mac FROM {self.table_macs_llips} WHERE {scope}"):
++            self.query(f"INSERT INTO {self.table_macs_llips} (mac, link_local_ip, last_update, interface) "
++                       f"VALUES ('{mac}', '{link_local_ip}', '{now}', '{interface}')")
++        else:
++            self.query(f"UPDATE {self.table_macs_llips} SET mac='{mac}', last_update='{now}' WHERE {scope}")
+
+     @clean_query_answer
+     def get_dynamic_prefix(self):
+@@ -1026,14 +1022,14 @@
+             collect all known MACs and link local addresses from database at startup
+             to reduce attempts to read neighbor cache
+         """
+-        query = f'SELECT link_local_ip, mac, last_update FROM {self.table_macs_llips}'
++        query = f'SELECT link_local_ip, mac, last_update, interface FROM {self.table_macs_llips}'
+         answer = self.query(query)
+         if answer:
+             for m in answer:
+                 try:
+                     # m[0] is LLIP, m[1] is the matching MAC
+-                    # interface is ignored
+-                    collected_macs[m[0]] = NeighborCacheRecord(llip=m[0], mac=m[1], now=m[2])
++                    # Link-local addresses are meaningful only within an interface.
++                    collected_macs[(m[3], m[0])] = NeighborCacheRecord(llip=m[0], mac=m[1], now=m[2], interface=m[3])
+                 except Exception as err:
+                     print(err)
+                     traceback.print_exc(file=sys.stdout)
+--- a/dhcpy6d/threads.py
++++ b/dhcpy6d/threads.py
+@@ -113,7 +113,7 @@
+                 for transaction in list(transactions.values()):
+                     try:
+                         if timer.time > transaction.timestamp + cfg.CLEANING_INTERVAL * 10:
+-                            transactions.pop(transaction.client_llip + transaction.id)
++                            transactions.pop((transaction.interface, transaction.client_llip, transaction.id))
+                     except Exception as err:
+                         log.error(f'TidyUp: transaction {str(err)} has already been deleted')
+                         traceback.print_exc(file=sys.stdout)
+@@ -148,7 +148,7 @@
+                         if record.timestamp + 60 * cfg.CLEANING_INTERVAL < timestamp:
+                             if cfg.LOG_MAC_LLIP:
+                                 log.info(f'deleted mac {record.mac} for llip {colonify_ip6(record.llip)}')
+-                            collected_macs.pop(record.llip)
++                            collected_macs.pop((record.interface, record.llip), None)
+                     del timestamp
+                 time.sleep(cfg.CLEANING_INTERVAL)
+         except:
+--- a/doc/volatile.postgresql
++++ b/doc/volatile.postgresql
+@@ -22,7 +22,8 @@
+   mac varchar(17) NOT NULL,
+   link_local_ip varchar(39) NOT NULL,
+   last_update bigint NOT NULL,
+-  PRIMARY KEY (mac)
++  interface varchar(64) NOT NULL,
++  PRIMARY KEY (interface, link_local_ip)
+ );
+
+ CREATE TABLE prefixes (
+@@ -59,4 +60,4 @@
+   PRIMARY KEY (prefix)
+ );
+
+-INSERT INTO meta (item_key, item_value) VALUES ('version', '3');
++INSERT INTO meta (item_key, item_value) VALUES ('version', '4');
+--- a/doc/volatile.sql
++++ b/doc/volatile.sql
+@@ -22,7 +22,8 @@
+   mac varchar(17) NOT NULL,
+   link_local_ip varchar(39) NOT NULL,
+   last_update bigint NOT NULL,
+-  PRIMARY KEY (mac)
++  interface varchar(64) NOT NULL,
++  PRIMARY KEY (interface, link_local_ip)
+ );
+
+ CREATE TABLE prefixes (
+@@ -59,4 +60,4 @@
+   PRIMARY KEY (prefix)
+ );
+
+-INSERT INTO meta (item_key, item_value) VALUES ('version', '3');
++INSERT INTO meta (item_key, item_value) VALUES ('version', '4');
+--- /dev/null
++++ b/scripts/test-mac-integration.sh
+@@ -0,0 +1,13 @@
++#!/usr/bin/env bash
++set -euo pipefail
++root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
++image=dhcpy6d-mac-integration:local
++artifacts="${MAC_TEST_ARTIFACTS:-$root/mac-test-artifacts}"
++mkdir -p "$artifacts"
++docker build -t "$image" -f "$root/tests/integration/Dockerfile" "$root"
++container=$(docker create --privileged --network none --mount "type=bind,src=$root,dst=/src,readonly" --tmpfs /run "$image")
++trap 'docker rm -f "$container" >/dev/null' EXIT
++docker start -a "$container" || true
++status=$(docker inspect -f '{{.State.ExitCode}}' "$container")
++docker cp "$container:/artifacts/." "$artifacts/"
++exit "$status"
+--- /dev/null
++++ b/tests/integration/Dockerfile
+@@ -0,0 +1,4 @@
++FROM debian:bookworm-slim
++RUN apt-get update && apt-get install -y --no-install-recommends python3 python3-distro python3-dnspython iproute2 iputils-ping tcpdump && rm -rf /var/lib/apt/lists/*
++WORKDIR /src
++ENTRYPOINT ["python3", "/src/tests/integration/mac_lookup.py"]
+--- /dev/null
++++ b/tests/integration/README.md
+@@ -0,0 +1,30 @@
++# Interface-scoped MAC lookup integration test
++
++Run on a Linux Docker runner:
++
++```sh
++scripts/test-mac-integration.sh
++```
++
++A disposable privileged container with `--network none` creates one server and
++two client network namespaces. Each client has the same link-local address
++`fe80::2`, but a different MAC, on its own veth link to the server. Real ICMPv6
++neighbour discovery populates the kernel neighbour table. No neighbour lookup or
++server component is mocked; no host networking or Docker socket is mounted.
++
++Both UDP DHCPv6 clients deliberately use transaction ID `123456`. The server
++uses MAC-derived EUI-64 allocation, with MAC lookup required. Assertions verify
++each client receives its own DUID and its MAC-derived address. Requests alternate
++between links, then reverse order after restarting the server with its persisted
++MAC cache. Both scoped database rows must survive. The integration workflow
++uploads PCAP, neighbour snapshot, Replies, server logs, SQLite database and JUnit.
++This tests MAC identification and transaction isolation using real kernel NDP
++and DHCPv6 sockets, rather than the lifecycle of a particular client daemon.
++
++The volatile database schema is now version 4. Upgrade rebuilds only the old
++MAC/link-local cache, since its rows contain no interface and cannot safely be
++migrated. Existing address/prefix leases and route state are retained. MACs are
++learned again from the neighbour cache; subsequent restarts retain their scope.
++Unit tests cover scoped storage, replacement and the SQLite schema upgrade.
++The generic schema change also applies to MySQL/PostgreSQL; those backends are
++not exercised by this Linux/SQLite integration test.
+--- /dev/null
++++ b/tests/integration/client.py
+@@ -0,0 +1,46 @@
++"""A real UDP DHCPv6 client with deterministic transaction and interface scope."""
++import ipaddress
++import json
++import socket
++import struct
++import sys
++
++
++def option(code, value):
++    return struct.pack('!HH', code, len(value)) + value
++
++
++def options(data):
++    while data:
++        code, length = struct.unpack('!HH', data[:4])
++        yield code, data[4:4 + length]
++        data = data[4 + length:]
++
++
++index = socket.if_nametoindex('eth0')
++sock = socket.socket(socket.AF_INET6, socket.SOCK_DGRAM)
++sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
++sock.setsockopt(socket.IPPROTO_IPV6, socket.IPV6_MULTICAST_IF, index)
++sock.settimeout(3)
++sock.bind(('fe80::2', 546, 0, index))
++duid = bytes.fromhex('00030001' + sys.argv[1].replace(':', ''))
++# Identical address AND transaction ID deliberately collide on different links.
++packet = b'\x01\x12\x34\x56' + option(1, duid) + option(3, struct.pack('!III', 1, 0, 0)) + option(14, b'')
++for attempt in range(8):
++    sock.sendto(packet, ('ff02::1:2', 547, 0, index))
++    try:
++        response, sender = sock.recvfrom(65535)
++    except socket.timeout:
++        continue
++    if response[:4] != b'\x07\x12\x34\x56':
++        continue
++    opts = dict(options(response[4:]))
++    if opts.get(1) != duid:
++        raise AssertionError('Reply contains the other interface client identity')
++    addresses = [str(ipaddress.IPv6Address(value[:16]))
++                 for code, value in options(opts.get(3, b'')[12:]) if code == 5]
++    if addresses:
++        print(json.dumps({'duid': duid.hex(), 'addresses': addresses, 'sender': sender[0]}))
++        break
++else:
++    raise AssertionError('No successful address Reply after repeated solicitations')
+--- /dev/null
++++ b/tests/integration/mac_lookup.py
+@@ -0,0 +1,126 @@
++"""Two isolated links, each with fe80::2, exercise actual kernel NDP and DHCP."""
++import ipaddress
++import json
++import os
++from pathlib import Path
++import sqlite3
++import subprocess
++import time
++import unittest
++import xml.etree.ElementTree as ET
++
++ARTIFACTS = Path('/artifacts')
++SERVER_ROOT = Path(os.environ.get('MAC_TEST_SERVER_ROOT', '/src'))
++
++
++def run(*args, ns=None):
++    try:
++        return subprocess.check_output((['ip', 'netns', 'exec', ns] if ns else []) + list(args),
++                                       text=True, stderr=subprocess.STDOUT, timeout=30)
++    except subprocess.CalledProcessError as error:
++        raise AssertionError(error.output) from error
++
++
++class ScopedMacLookup(unittest.TestCase):
++    def test_same_link_local_address_on_separate_interfaces(self):
++        self.assertTrue(Path('/.dockerenv').exists(), 'run in the disposable test container')
++        ARTIFACTS.mkdir(exist_ok=True)
++        processes = []
++        handles = []
++        namespaces = []
++
++        def spawn(args, ns, name):
++            handle = (ARTIFACTS / name).open('w')
++            handles.append(handle)
++            proc = subprocess.Popen(['ip', 'netns', 'exec', ns] + args, stdout=handle, stderr=subprocess.STDOUT)
++            processes.append(proc)
++            return proc
++
++        try:
++            for ns in ('server', 'client0', 'client1'):
++                run('ip', 'netns', 'add', ns)
++                namespaces.append(ns)
++                run('ip', 'link', 'set', 'lo', 'up', ns=ns)
++            macs = ['02:00:00:00:00:11', '02:00:00:00:00:22']
++            for i, mac in enumerate(macs):
++                run('ip', 'link', 'add', f's{i}', 'type', 'veth', 'peer', 'name', f'c{i}')
++                run('ip', 'link', 'set', f's{i}', 'netns', 'server')
++                run('ip', 'link', 'set', f'c{i}', 'netns', f'client{i}')
++                run('ip', 'link', 'set', f's{i}', 'name', f'lan{i}', ns='server')
++                run('ip', 'link', 'set', f'c{i}', 'name', 'eth0', ns=f'client{i}')
++                run('ip', 'link', 'set', 'eth0', 'address', mac, ns=f'client{i}')
++                for ns, interface, address in [('server', f'lan{i}', 'fe80::1'), (f'client{i}', 'eth0', 'fe80::2')]:
++                    run('ip', 'link', 'set', interface, 'up', ns=ns)
++                    run('ip', '-6', 'addr', 'replace', address + '/64', 'dev', interface, 'nodad', ns=ns)
++                run('ping', '-6', '-c', '1', '-W', '2', 'fe80::1%eth0', ns=f'client{i}')
++            neighbours = json.loads(run('ip', '-j', '-6', 'neigh', 'show', ns='server'))
++            (ARTIFACTS / 'neighbours.json').write_text(json.dumps(neighbours, indent=2))
++            self.assertEqual({(row['dev'], row.get('lladdr')) for row in neighbours if row['dst'] == 'fe80::2'},
++                             {('lan0', macs[0]), ('lan1', macs[1])})
++            spawn(['tcpdump', '-ni', 'any', '-U', '-w', str(ARTIFACTS / 'packets.pcap'), 'udp port 546 or udp port 547'], 'server', 'tcpdump.log')
++            (ARTIFACTS / 'leases.sqlite').touch()
++            conf = ARTIFACTS / 'server.conf'
++            conf.write_text(f'''[dhcpy6d]
++interface = lan0 lan1
++store_config = none
++store_sqlite_volatile = {ARTIFACTS}/leases.sqlite
++identification = mac
++ignore_mac = no
++cache_mac_llip = yes
++really_do_it = yes
++log = yes
++log_console = yes
++log_mac_llip = yes
++serverduid = 0001000100010000020000000001
++[class_default]
++addresses = pool
++[address_pool]
++category = eui64
++pattern = 2001:db8:1::$eui64$
++''')
++            expected = ['2001:db8:1::ff:fe00:11', '2001:db8:1::ff:fe00:22']
++            for cycle in range(2):
++                server = spawn(['python3', str(SERVER_ROOT / 'main.py'), '-c', str(conf)], 'server', f'server-{cycle}.log')
++                for _ in range(100):
++                    if 'Listening on interfaces' in (ARTIFACTS / f'server-{cycle}.log').read_text():
++                        break
++                    self.assertIsNone(server.poll(), (ARTIFACTS / f'server-{cycle}.log').read_text())
++                    time.sleep(.1)
++                else:
++                    self.fail('server never became ready')
++                # Reverse order after restart to expose whichever neighbour wins.
++                for i in ([0, 1, 0] if cycle == 0 else [1, 0, 1]):
++                    result = json.loads(run('python3', '/src/tests/integration/client.py', macs[i], ns=f'client{i}'))
++                    (ARTIFACTS / f'reply-{cycle}-{i}.json').write_text(json.dumps(result))
++                    self.assertEqual(result['addresses'], [expected[i]], result)
++                with sqlite3.connect(ARTIFACTS / 'leases.sqlite') as db:
++                    rows = db.execute('SELECT interface, mac, link_local_ip FROM macs_llips ORDER BY interface').fetchall()
++                    self.assertEqual(rows, [('lan0', macs[0], ipaddress.IPv6Address('fe80::2').exploded.replace(':', '')),
++                                            ('lan1', macs[1], ipaddress.IPv6Address('fe80::2').exploded.replace(':', ''))])
++                server.terminate()
++                server.wait(timeout=5)
++        finally:
++            for proc in reversed(processes):
++                if proc.poll() is None:
++                    proc.terminate()
++                    try:
++                        proc.wait(timeout=3)
++                    except subprocess.TimeoutExpired:
++                        proc.kill()
++                        proc.wait()
++            for handle in handles:
++                handle.close()
++            for ns in reversed(namespaces):
++                subprocess.run(['ip', 'netns', 'del', ns], check=False)
++
++
++if __name__ == '__main__':
++    suite = unittest.defaultTestLoader.loadTestsFromTestCase(ScopedMacLookup)
++    result = unittest.TextTestRunner(verbosity=2).run(suite)
++    report = ET.Element('testsuite', name='interface-scoped-mac', tests=str(result.testsRun),
++                        failures=str(len(result.failures)), errors=str(len(result.errors)))
++    case = ET.SubElement(report, 'testcase', name='same_link_local_on_separate_interfaces')
++    for test, detail in result.failures + result.errors:
++        ET.SubElement(case, 'failure').text = detail
++    ET.ElementTree(report).write(ARTIFACTS / 'junit.xml', encoding='utf-8', xml_declaration=True)
++    raise SystemExit(not result.wasSuccessful())
+--- /dev/null
++++ b/tests/test_interface_mac.py
+@@ -0,0 +1,90 @@
++"""Neighbour identity must include its link-local scope."""
++import unittest
++from unittest.mock import patch
++
++from tests.test_prefix_substitution import cfg
++import sqlite3
++from dhcpy6d import macs
++from dhcpy6d.globals import collected_macs
++from dhcpy6d.helpers import NeighborCacheRecord, decompress_ip6
++from dhcpy6d.storage.store import Store
++from dhcpy6d.storage.schemas import MYSQL_SQLITE, legacy_adjustments
++
++
++class InterfaceMacTest(unittest.TestCase):
++    def setUp(self):
++        self.saved = collected_macs.copy()
++        collected_macs.clear()
++        self.db = sqlite3.connect(':memory:')
++        self.db.execute(MYSQL_SQLITE['macs_llips'])
++        self.store = Store(None, None)
++        self.store.query = lambda sql: self.db.execute(sql).fetchall()
++        self.llip = decompress_ip6('fe80::2')
++
++    def tearDown(self):
++        self.db.close()
++        collected_macs.clear()
++        collected_macs.update(self.saved)
++
++    def test_collection_and_persistence_keep_both_interfaces(self):
++        records = {(nic, self.llip): NeighborCacheRecord(self.llip, mac, nic, 100)
++                   for nic, mac in [('lan0', '02:00:00:00:00:11'), ('lan1', '02:00:00:00:00:22')]}
++        with patch.object(macs, 'get_neighbor_cache_linux', return_value=records), \
++                patch.object(macs, 'volatile_store', self.store), \
++                patch.object(macs, 'OS', 'Linux'), patch.object(cfg, 'CACHE_MAC_LLIP', True):
++            macs.collect_macs(100)
++        self.assertEqual({key: record.mac for key, record in collected_macs.items()},
++                         {key: record.mac for key, record in records.items()})
++        collected_macs.clear()
++        self.store.collect_macs_from_db()
++        self.assertEqual({key: record.mac for key, record in collected_macs.items()},
++                         {key: record.mac for key, record in records.items()})
++
++    def test_relearned_mac_replaces_only_its_interface(self):
++        collected_macs[('lan0', self.llip)] = NeighborCacheRecord(self.llip, '02:00:00:00:00:11', 'lan0', 100)
++        collected_macs[('lan1', self.llip)] = NeighborCacheRecord(self.llip, '02:00:00:00:00:22', 'lan1', 100)
++        with patch.object(macs, 'volatile_store', self.store), patch.object(cfg, 'CACHE_MAC_LLIP', True):
++            macs.remember_neighbor(NeighborCacheRecord(self.llip, '02:00:00:00:00:33', 'lan0', 101))
++        self.assertEqual(collected_macs[('lan0', self.llip)].mac, '02:00:00:00:00:33')
++        self.assertEqual(collected_macs[('lan1', self.llip)].mac, '02:00:00:00:00:22')
++
++    def test_bsd_command_output_keeps_scopes_and_skips_incomplete_rows(self):
++        output = "header\nfe80::2%lan0 02:00:00:00:00:11 lan0\nfe80::2%lan1 02:00:00:00:00:22 lan1\nfe80::3 (incomplete) lan0"
++        with patch.object(macs, 'OS', 'BSD'), patch.object(cfg, 'INTERFACE', ['lan0', 'lan1']), \
++                patch.object(macs.subprocess, 'getoutput', return_value=output), \
++                patch.object(cfg, 'CACHE_MAC_LLIP', False), patch.object(macs, 'volatile_store') as store:
++            macs.collect_macs(100)
++        self.assertEqual(set(collected_macs), {('lan0', self.llip), ('lan1', self.llip)})
++        store.store_mac_llip.assert_not_called()
++
++    def test_mac_replacement_only_updates_its_own_scope(self):
++        for interface in ('lan0', 'lan1'):
++            self.store.store_mac_llip('02:00:00:00:00:11', self.llip, 100, interface)
++        self.store.store_mac_llip('02:00:00:00:00:33', self.llip, 101, 'lan0')
++        self.assertEqual(self.db.execute('SELECT interface,mac FROM macs_llips ORDER BY interface').fetchall(),
++                         [('lan0', '02:00:00:00:00:33'), ('lan1', '02:00:00:00:00:11')])
++
++    def test_legacy_cache_discarded_without_touching_leases(self):
++        self.db.execute('DROP TABLE macs_llips')
++        self.db.execute('CREATE TABLE macs_llips(mac text PRIMARY KEY,link_local_ip text,last_update bigint)')
++        self.db.execute("INSERT INTO macs_llips VALUES ('02:00:00:00:00:11','fe80::2',100)")
++        self.db.execute('CREATE TABLE leases(last_message int,last_update bigint)')
++        self.db.execute('INSERT INTO leases VALUES (3,100)')
++        self.db.execute('CREATE TABLE meta(item_key text PRIMARY KEY,item_value text)')
++        self.db.execute("INSERT INTO meta VALUES ('version','3')")
++        self.store.get_db_version = lambda: self.db.execute("SELECT item_value FROM meta WHERE item_key='version'").fetchone()[0]
++        self.db.execute('CREATE TABLE prefixes(prefix text)')
++        self.db.execute("INSERT INTO prefixes VALUES ('retained-prefix')")
++        self.db.execute('CREATE TABLE routes(router text)')
++        self.db.execute("INSERT INTO routes VALUES ('retained-router')")
++        legacy_adjustments(self.store)
++        self.assertEqual(self.store.get_db_version(), '4')
++        self.assertEqual(self.db.execute('SELECT * FROM leases').fetchall(), [(3, 100)])
++        self.assertEqual(self.db.execute('SELECT * FROM macs_llips').fetchall(), [])
++        self.assertEqual(self.db.execute('SELECT * FROM prefixes').fetchall(), [('retained-prefix',)])
++        self.assertEqual(self.db.execute('SELECT * FROM routes').fetchall(), [('retained-router',)])
++        self.store.store_mac_llip('02:00:00:00:00:22', self.llip, 101, 'lan1')
++
++
++if __name__ == '__main__':
++    unittest.main()

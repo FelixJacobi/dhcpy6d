@@ -4,7 +4,7 @@
 
 override_dh_auto_build:
 	# Quilt does not preserve executable bits on newly added test scripts.
-	chmod +x scripts/test-e2e.sh tests/e2e/route-hook
+	chmod +x scripts/test-e2e.sh scripts/test-mac-integration.sh tests/e2e/route-hook
 	python3 scripts/generate_manpages.py --out-dir .
 	dh_auto_build
 

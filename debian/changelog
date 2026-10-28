@@ -1,3 +1,15 @@
+dhcpy6d (1.7.0-1+stsblnmu6) unstable; urgency=medium
+
+  * Non-maintainer upload.
+  * Scope neighbour MAC lookup, cached mappings, transactions and link-local
+    request tracking by interface to distinguish clients sharing fe80::2.
+  * Upgrade the volatile schema to version 4, rebuilding only the unscoped
+    MAC cache while preserving address/prefix leases and route state.
+  * Add real-network Docker integration coverage and GitHub Actions evidence
+    for duplicate link-local addresses before and after daemon restart.
+
+ -- Felix Jacobi <felix.jacobi@iserv.eu>  Thu, 29 Oct 2026 00:05:23 +0100
+
 dhcpy6d (1.7.0-1+stsblnmu5) UNRELEASED; urgency=medium
 
   * Add opt-in authenticated DHCPv6 Reconfigure after startup and prefix
