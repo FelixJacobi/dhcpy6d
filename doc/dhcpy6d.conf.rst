@@ -252,7 +252,7 @@ environments.
     Enable authenticated DHCPv6 Reconfigure and persist client keys and replay
     counters in this private SQLite file. The parent directory must be writable
     by the daemon user. Consenting clients are prompted to Renew at startup and
-    after dynamic prefix updates. See ``reconfigure.rst`` for client setup and
+    after dynamic prefix updates. See **dhcpy6d-reconfigure(7)** for client setup and
     rollout requirements.
     *Default: empty (disabled)*
 
