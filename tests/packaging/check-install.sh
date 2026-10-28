@@ -21,12 +21,15 @@ dpkg -i "$package" >/tmp/install.log 2>&1 || { cat /tmp/install.log; exit 1; }
 [ "$(stat -c '%U:%G %a' "$state")" = 'dhcpy6d:dhcpy6d 600' ]
 python3 - <<'PY'
 import gzip
+import shlex
 import sqlite3
 with sqlite3.connect('/var/lib/dhcpy6d/reconfigure.sqlite') as db:
     db.execute('CREATE TABLE preserved (value TEXT)')
     db.execute("INSERT INTO preserved VALUES ('synthetic-key-and-replay-state')")
 with gzip.open('/usr/share/man/man7/dhcpy6d-reconfigure.7.gz', 'rt') as page:
-    assert '.TH "DHCPY6D-RECONFIGURE" "7"' in page.read()
+    header = next(line for line in page if line.startswith('.TH '))
+    fields = shlex.split(header.replace(r'\-', '-'))
+    assert fields[1].upper() == 'DHCPY6D-RECONFIGURE' and fields[2] == '7', header
 PY
 printf '\n# Locally maintained configuration\n' >> /etc/dhcpy6d.conf
 cp /etc/dhcpy6d.conf /tmp/config-before
