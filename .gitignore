@@ -26,3 +26,6 @@ debian/*.debhelper.log
 debian/*.substvars
 debian/tmp/
 debian/dhcpy6d/
+
+# Docker interoperability test results
+e2e-artifacts/
