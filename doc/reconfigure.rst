@@ -39,9 +39,11 @@ Release removes the client's record. Keys and counters are scoped to the server
 DUID so changing identity cannot reuse another server's negotiated state.
 
 This feature triggers the normal Renew handler; it does not change lease
-selection or route-hook behavior. In particular, upstream's existing handling of
-renumbered prefixes and its lack of Renew route-up hooks are separate concerns.
-A Reconfigure is not a substitute for restoring routes for valid delegations.
+selection or route-hook behavior. The Docker suite verifies that dhcpcd recovers
+a changed IA_PD while retaining a stable IA_NA: withdrawal is followed by a repeated
+authenticated prompt and a fresh allocation. Upstream still lacks Renew route-up
+hooks for restoring a deleted route to an unchanged valid delegation; that is a
+separate known failure in the suite.
 
 Compatibility check
 -------------------

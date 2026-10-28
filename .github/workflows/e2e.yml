@@ -1,0 +1,36 @@
+name: DHCPv6 interoperability
+
+on:
+  pull_request:
+  push:
+    branches: ['**']
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  clients:
+    name: DHCPv6 / ${{ matrix.client }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        client: [kea, dhclient, dhcpcd, networkd]
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build isolated test image
+        run: docker build -t dhcpy6d-e2e:local -f tests/e2e/Dockerfile .
+      - name: Run real client and relay tests
+        env:
+          E2E_SKIP_BUILD: '1'
+        run: scripts/test-e2e.sh "${{ matrix.client }}"
+      - name: Upload packet captures, logs, versions and JUnit results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: dhcpv6-${{ matrix.client }}
+          path: e2e-artifacts/
+          if-no-files-found: error
+          retention-days: 14
