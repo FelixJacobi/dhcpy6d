@@ -6,3 +6,4 @@ stsbl-nmu4-renew-route-hook.patch
 stsbl-nmu4-fixed-prefix-test-isolation.patch
 stsbl-nmu5-authenticated-reconfigure.patch
 stsbl-nmu6-interface-scoped-mac.patch
+stsbl-nmu7-fixed-prefix-startup.patch

@@ -277,6 +277,9 @@ def reuse_lease(client=None, client_config=None, transaction=None):
                 if configured_prefix not in active_prefixes:
                     client.prefixes.append(Prefix(prefix=prefix['address'],
                                                   length=prefix['length'],
+                                                  category='fixed',
+                                                  ptype='fixed',
+                                                  pclass=client.client_class,
                                                   preferred_lifetime=cfg.PREFERRED_LIFETIME,
                                                   valid_lifetime=cfg.VALID_LIFETIME,
                                                   route_link_local=client_config.PREFIX_ROUTE_LINK_LOCAL))

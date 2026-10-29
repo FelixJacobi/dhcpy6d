@@ -1,0 +1,418 @@
+Description: Preserve valid fixed client prefix routes on startup
+ Validate current client assignment before named pool checks, accepting legacy
+ lease metadata. Mark new fixed delegations and test real kernel startup routes.
+Origin: https://github.com/HenriWahl/dhcpy6d/pull/84
+Author: Felix Jacobi <felix.jacobi@iserv.eu>
+Last-Update: 2026-10-29
+
+--- a/.github/workflows/test.yml
++++ b/.github/workflows/test.yml
+@@ -28,2 +28,13 @@
+           name: interface-mac-evidence
+           path: mac-test-artifacts/
++  fixed-prefix-startup:
++    runs-on: ubuntu-latest
++    steps:
++      - uses: actions/checkout@v4
++      - name: Test startup route reconciliation without DHCP clients
++        run: bash scripts/test-startup-routes.sh
++      - uses: actions/upload-artifact@v4
++        if: always()
++        with:
++          name: startup-route-artifacts
++          path: startup-route-artifacts/
+--- a/.gitignore
++++ b/.gitignore
+@@ -33,2 +33,3 @@
+ man/man7/*.7
+ /mac-test-artifacts/
++startup-route-artifacts/
+--- a/dhcpy6d/client/from_config.py
++++ b/dhcpy6d/client/from_config.py
+@@ -79,4 +79,7 @@
+                 ia_pd = Prefix(prefix=prefix['address'],
+                                length=prefix['length'],
++                               category='fixed',
++                               ptype='fixed',
++                               pclass=client.client_class,
+                                preferred_lifetime=cfg.PREFERRED_LIFETIME,
+                                valid_lifetime=cfg.VALID_LIFETIME,
+--- a/dhcpy6d/client/reuse_lease.py
++++ b/dhcpy6d/client/reuse_lease.py
+@@ -278,4 +278,7 @@
+                     client.prefixes.append(Prefix(prefix=prefix['address'],
+                                                   length=prefix['length'],
++                                                  category='fixed',
++                                                  ptype='fixed',
++                                                  pclass=client.client_class,
+                                                   preferred_lifetime=cfg.PREFERRED_LIFETIME,
+                                                   valid_lifetime=cfg.VALID_LIFETIME,
+--- a/dhcpy6d/route.py
++++ b/dhcpy6d/route.py
+@@ -17,4 +17,6 @@
+ # Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301, USA
+
++from types import SimpleNamespace
++
+ from .config import cfg
+ from .globals import (route_queue,
+@@ -22,5 +24,5 @@
+ from .helpers import normalize_route_prefix
+ from .log import log
+-from .storage import volatile_store
++from .storage import config_store, volatile_store
+
+
+@@ -90,4 +92,21 @@
+         if pclass not in cfg.CLASSES:
+             return True
++        owner = volatile_store.get_prefix_owner(prefix)
++        if owner is not None:
++            hostname, mac, duid, category = owner
++            identity = SimpleNamespace(hostname=hostname, mac=mac, duid=duid,
++                                       client_config_dicts=None)
++            client = config_store.find_client_config(identity)
++            if client is not None and client.CLASS == pclass:
++                expected = normalize_route_prefix(prefix, length)
++                for assignment in client.PREFIX or []:
++                    if str(assignment['length']) == str(length) and \
++                            normalize_route_prefix(assignment['address'], assignment['length']) == expected:
++                        return False
++            # New records identify fixed assignments explicitly. Legacy records
++            # used the generic 'default' type/range category: allow their current
++            # client assignment above before applying the normal pool guard.
++            if category == 'fixed':
++                return True
+         if ptype not in cfg.CLASSES[pclass].PREFIXES:
+             return True
+--- a/dhcpy6d/storage/store.py
++++ b/dhcpy6d/storage/store.py
+@@ -621,4 +621,24 @@
+         return None
+
++    def get_prefix_owner(self, prefix):
++        """Return the identity and allocation category of a persisted delegation."""
++        answer = self.query(f"SELECT hostname, mac, duid, category FROM {self.table_prefixes} "
++                            f"WHERE prefix = '{prefix}'")
++        return answer[0] if answer else None
++
++    def find_client_config(self, transaction):
++        """Resolve an identity without allocating or renewing any leases."""
++        if not cfg.STORE_CONFIG:
++            return None
++        if cfg.STORE_CONFIG != 'file':
++            self.build_config_from_db(transaction)
++        matches = []
++        for identification in cfg.IDENTIFICATION:
++            hosts = getattr(self, 'get_client_config_by_' + identification)(transaction)
++            if hosts or cfg.IDENTIFICATION_MODE == 'match_all':
++                matches.append(set(hosts or []))
++        candidates = set.intersection(*matches) if matches else set()
++        return candidates.pop() if len(candidates) == 1 else None
++
+     def deactivate_prefix(self, prefix):
+         """
+--- /dev/null
++++ b/scripts/test-startup-routes.sh
+@@ -0,0 +1,13 @@
++#!/usr/bin/env bash
++set -euo pipefail
++root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
++image=dhcpy6d-startup-routes:local
++artifacts="${STARTUP_TEST_ARTIFACTS:-$root/startup-route-artifacts}"
++mkdir -p "$artifacts"
++docker build -t "$image" -f "$root/tests/startup_routes/Dockerfile" "$root"
++container=$(docker create --privileged --network none --mount "type=bind,src=$root,dst=/src,readonly" --tmpfs /run "$image")
++trap 'docker rm -f "$container" >/dev/null' EXIT
++docker start -a "$container" || true
++status=$(docker inspect -f '{{.State.ExitCode}}' "$container")
++docker cp "$container:/artifacts/." "$artifacts/"
++exit "$status"
+--- /dev/null
++++ b/tests/startup_routes/Dockerfile
+@@ -0,0 +1,4 @@
++FROM debian:bookworm-slim
++RUN apt-get update && apt-get install -y --no-install-recommends python3 python3-distro python3-dnspython iproute2 && rm -rf /var/lib/apt/lists/*
++WORKDIR /src
++ENTRYPOINT ["python3", "/src/tests/startup_routes/run.py"]
+--- /dev/null
++++ b/tests/startup_routes/README.md
+@@ -0,0 +1,13 @@
++Run `bash scripts/test-startup-routes.sh` with Docker. The privileged disposable
++container uses `--network none`; it does not change host interfaces.
++
++The test seeds a legacy fixed-prefix lease, starts the daemon with no DHCP
++clients, and verifies real kernel routes and SQLite state. It checks retaining
++an existing route, restoring a missing route on restart, and removing a route
++when its fixed assignment changes. Logs and database evidence are copied to
++`startup-route-artifacts/`. Unit tests also cover expired leases, assignment
++length/class changes, identity ambiguity, SQL client configuration, and named
++prefix pools.
++
++Existing installations need no lease database reset. Fixed client prefixes are
++validated against current client configuration before named-pool validation.
+--- /dev/null
++++ b/tests/startup_routes/hook.py
+@@ -0,0 +1,8 @@
++import subprocess
++import sys
++from pathlib import Path
++mode, prefix, router = sys.argv[1:]
++with Path('/artifacts/hooks.log').open('a') as output:
++    output.write(mode + ' ' + prefix + '\n')
++subprocess.run(['ip', '-6', 'route', 'replace' if mode == 'up' else 'del', prefix,
++                'via', router, 'dev', 'lan0'], check=True)
+--- /dev/null
++++ b/tests/startup_routes/run.py
+@@ -0,0 +1,88 @@
++"""Exercise daemon startup and kernel routes without any DHCP client running."""
++import json
++import os
++from pathlib import Path
++import sqlite3
++import subprocess
++import time
++
++ROOT = Path(os.environ.get('STARTUP_SERVER_ROOT', '/src'))
++ART = Path('/artifacts')
++ART.mkdir(exist_ok=True)
++assert Path('/.dockerenv').exists(), 'Run only in the disposable container'
++
++
++def run(*args):
++    return subprocess.check_output(args, text=True, stderr=subprocess.STDOUT)
++
++
++run('ip', 'link', 'add', 'lan0', 'type', 'dummy')
++run('ip', 'link', 'set', 'lan0', 'up')
++run('ip', '-6', 'addr', 'add', 'fe80::1/64', 'dev', 'lan0', 'nodad')
++prefix = '20010db8001000b00000000000000000'
++route = '2001:db8:10:b0::/60'
++clients = ART / 'clients.conf'
++clients.write_text('[client]\nhostname = client\nmac = 02:00:00:00:00:02\nclass = fixed_lan\nprefix = ' + route + '\n')
++conf = ART / 'server.conf'
++conf.write_text(f"""[dhcpy6d]
++interface = lan0
++store_config = file
++store_file_config = {clients}
++store_sqlite_volatile = {ART}/leases.sqlite
++identification = mac
++really_do_it = yes
++manage_routes_at_start = yes
++log = yes
++log_console = yes
++serverduid = 0001000100010000020000000001
++[class_fixed_lan]
++interface = lan0
++addresses =
++advertise = prefixes
++call_up = python3 /src/tests/startup_routes/hook.py up $prefix$/$length$ $router$
++call_down = python3 /src/tests/startup_routes/hook.py down $prefix$/$length$ $router$
++""")
++with sqlite3.connect(ART / 'leases.sqlite') as db:
++    db.executescript((ROOT / 'doc/volatile.sql').read_text())
++    columns = [row[1] for row in db.execute('pragma table_info(prefixes)')]
++    values = dict.fromkeys(columns, 0)
++    values.update(prefix=prefix, length=60, active=1, hostname='client', type='default',
++                  category='range', mac='02:00:00:00:00:02', duid='0001',
++                  valid_until=int(time.time())+7200, **{'class': 'fixed_lan'})
++    db.execute('insert into prefixes values (' + ','.join('?' for _ in columns) + ')', [values[c] for c in columns])
++    db.execute('insert into routes values (?,60,?,0)', (prefix, 'fe800000000000000000000000000002'))
++run('ip', '-6', 'route', 'replace', route, 'via', 'fe80::2', 'dev', 'lan0')
++for cycle in range(3):
++    if cycle == 1:
++        # The kernel lost its route; startup must restore it from the lease DB.
++        run('ip', '-6', 'route', 'del', route)
++    if cycle == 2:
++        clients.write_text(clients.read_text().replace(route, '2001:db8:10:c0::/60'))
++    hook = ART / 'hooks.log'
++    hook.write_text('')
++    logfile = ART / f'server-{cycle}.log'
++    with logfile.open('w') as output:
++        process = subprocess.Popen(['python3', str(ROOT / 'main.py'), '-c', str(conf)], stdout=output, stderr=subprocess.STDOUT)
++        try:
++            for _ in range(100):
++                text = logfile.read_text()
++                if 'Listening on interfaces' in text and hook.read_text():
++                    time.sleep(.2)
++                    break
++                assert process.poll() is None, text
++                time.sleep(.1)
++            else:
++                raise AssertionError(logfile.read_text())
++            events = hook.read_text().splitlines()
++            expected = 'down' if cycle == 2 else 'up'
++            assert len(events) == 1 and events[0].startswith(expected + ' '), events
++            routes = json.loads(run('ip', '-j', '-6', 'route', 'show', route))
++            (ART / f'routes-{cycle}.json').write_text(json.dumps(routes, indent=2))
++            assert bool(routes) == (cycle != 2), routes
++            with sqlite3.connect(ART / 'leases.sqlite') as db:
++                assert db.execute('select active from prefixes').fetchone() == ((0,) if cycle == 2 else (1,))
++                assert db.execute('select count(*) from routes').fetchone() == ((0,) if cycle == 2 else (1,))
++        finally:
++            process.terminate()
++            process.wait(timeout=10)
++print('PASS: retained fixed route, restored missing kernel route, removed changed assignment; no DHCP clients')
+--- /dev/null
++++ b/tests/test_fixed_route_startup.py
+@@ -0,0 +1,150 @@
++"""Startup reconciliation with real SQLite lease rows and textfile client config."""
++# Support both unittest discovery layouts and initialize daemon imports first.
++if __package__:
++    from . import test_prefix_substitution
++else:
++    import test_prefix_substitution
++import sqlite3
++import tempfile
++import unittest
++from pathlib import Path
++from types import SimpleNamespace
++from unittest.mock import patch
++
++from dhcpy6d.config import cfg
++from dhcpy6d.globals import route_queue, timer
++from dhcpy6d.storage.store import Store
++from dhcpy6d.storage.textfile import Textfile
++from dhcpy6d import route
++
++PREFIX = '20010db8001000b00000000000000000'
++MAC = '02:00:00:00:00:02'
++
++
++class FixedRouteStartupTest(unittest.TestCase):
++    def setUp(self):
++        self.temp = tempfile.TemporaryDirectory()
++        self.addCleanup(self.temp.cleanup)
++        self.db = sqlite3.connect(':memory:')
++        self.addCleanup(self.db.close)
++        self.db.executescript("""
++            CREATE TABLE prefixes (prefix TEXT PRIMARY KEY, length INTEGER, active INTEGER,
++                hostname TEXT, type TEXT, category TEXT, class TEXT, mac TEXT, duid TEXT,
++                valid_until INTEGER, last_message INTEGER);
++            CREATE TABLE routes (prefix TEXT PRIMARY KEY, length INTEGER, router TEXT, last_update INTEGER);
++        """)
++        columns = [row[1] for row in self.db.execute('pragma table_info(prefixes)')]
++        values = dict.fromkeys(columns, 0)
++        values.update(prefix=PREFIX, length=60, active=1, hostname='client',
++                      type='default', category='range', **{'class': 'fixed_lan'},
++                      mac=MAC, duid='0001000100000000000000000002', valid_until=1000)
++        self.db.execute('insert into prefixes values (' + ','.join('?' for _ in columns) + ')',
++                        [values[col] for col in columns])
++        self.db.execute('insert into routes values (?,60,?,0)',
++                        (PREFIX, 'fe800000000000000000000000000002'))
++        self.store = Store(None, None)
++        self.store.query = lambda sql: self.db.execute(sql).fetchall()
++        self.client_file = Path(self.temp.name) / 'clients.conf'
++        self.patches = [patch.object(cfg, 'STORE_CONFIG', 'file'),
++                        patch.object(cfg, 'STORE_FILE_CONFIG', str(self.client_file)),
++                        patch.object(cfg, 'IDENTIFICATION', ['mac']),
++                        patch.object(cfg, 'IDENTIFICATION_MODE', 'match_all'),
++                        patch.object(cfg, 'CLASSES', {'fixed_lan': SimpleNamespace(
++                            PREFIXES=[], ADDRESSES=[], CALL_UP='add', CALL_DOWN='del')}),
++                        patch.object(route, 'volatile_store', self.store)]
++        for item in self.patches:
++            item.start()
++            self.addCleanup(item.stop)
++        timer.time = 100
++        self.configure()
++        self.clear_queue()
++        self.addCleanup(self.clear_queue)
++
++    @staticmethod
++    def clear_queue():
++        while not route_queue.empty():
++            route_queue.get_nowait()
++
++    def configure(self, prefix='2001:db8:10:b0::/60', mac=MAC, client_class='fixed_lan'):
++        self.client_file.write_text('[client]\nhostname = client\nmac = ' + mac +
++                                   '\nclass = ' + client_class + '\nprefix = ' + prefix + '\n')
++        self.config = Textfile(None, None)
++
++    def reconcile(self):
++        with patch.object(route, 'config_store', self.config):
++            route.manage_prefixes_routes()
++        return [route_queue.get_nowait() for _ in range(route_queue.qsize())]
++
++    def test_legacy_fixed_assignment_is_retained_on_repeated_startup(self):
++        for _ in range(2):
++            self.assertEqual([event[0] for event in self.reconcile()], ['up'])
++            self.assertEqual(self.db.execute('select active from prefixes').fetchone(), (1,))
++            self.assertEqual(self.db.execute('select count(*) from routes').fetchone(), (1,))
++
++    def test_new_fixed_metadata_is_retained(self):
++        self.db.execute("update prefixes set type='fixed', category='fixed'")
++        self.assertEqual([event[0] for event in self.reconcile()], ['up'])
++
++    def test_removed_or_changed_assignment_is_deconfigured(self):
++        for prefix in ('', '2001:db8:10:c0::/60', '2001:db8:10:b0::/64'):
++            with self.subTest(prefix=prefix):
++                self.configure(prefix=prefix)
++                self.db.execute('update prefixes set active=1')
++                self.db.execute('insert or replace into routes values (?,60,?,0)', (PREFIX, 'fe80::2'))
++                self.assertEqual([event[0] for event in self.reconcile()], ['down'])
++                self.assertEqual(self.db.execute('select active from prefixes').fetchone(), (0,))
++                self.assertEqual(self.db.execute('select count(*) from routes').fetchone(), (0,))
++
++    def test_changed_owner_is_deconfigured(self):
++        self.configure(mac='02:00:00:00:00:03')
++        self.assertEqual([event[0] for event in self.reconcile()], ['down'])
++
++    def test_changed_class_is_deconfigured(self):
++        self.config.hosts['client'].CLASS = 'other'
++        self.assertEqual([event[0] for event in self.reconcile()], ['down'])
++
++    def test_expired_fixed_assignment_is_not_reinstalled(self):
++        self.db.execute('update prefixes set valid_until=99')
++        self.assertEqual([event[0] for event in self.reconcile()], ['down'])
++
++    def test_named_pool_still_uses_pool_validation(self):
++        cfg.CLASSES['fixed_lan'].PREFIXES = ['pool']
++        with patch.object(cfg, 'PREFIXES', {'pool': SimpleNamespace(LENGTH=60)}):
++            self.db.execute("update prefixes set type='pool'")
++            self.configure(prefix='')
++            self.assertEqual([event[0] for event in self.reconcile()], ['up'])
++
++    def test_match_all_requires_all_configured_identifiers(self):
++        with patch.object(cfg, 'IDENTIFICATION', ['mac', 'duid']):
++            self.assertEqual([event[0] for event in self.reconcile()], ['down'])
++
++    def test_ambiguous_owner_is_not_reused(self):
++        self.config.index_mac[MAC].append(object())
++        self.assertIsNone(self.config.find_client_config(SimpleNamespace(mac=MAC)))
++
++    def test_sql_client_config_resolves_fixed_assignment(self):
++        db = sqlite3.connect(':memory:')
++        self.addCleanup(db.close)
++        db.execute('create table hosts (hostname, mac, duid, class, address, prefix, id)')
++        db.execute('insert into hosts values (?,?,?,?,?,?,?)',
++                   ('client', MAC, '', 'fixed_lan', '', '2001:db8:10:b0::/60', ''))
++        config = Store(None, None)
++        config.config_prefix_support = True
++        config.query = lambda sql: db.execute(sql).fetchall()
++        with patch.object(cfg, 'STORE_CONFIG', 'sqlite'), patch.object(route, 'config_store', config):
++            route.manage_prefixes_routes()
++        self.assertEqual(route_queue.get_nowait()[0], 'up')
++
++    def test_from_config_marks_fixed_prefix_metadata(self):
++        from dhcpy6d.client.from_config import from_config
++        from dhcpy6d.constants import CONST
++        client = SimpleNamespace(prefixes=[], addresses=[], bootfiles=[])
++        tx = SimpleNamespace(interface='lan0', ia_options=[CONST.OPTION.IA_PD])
++        current_class = cfg.CLASSES['fixed_lan']
++        current_class.INTERFACE = ['lan0']
++        current_class.ANSWER = 'normal'
++        current_class.ADVERTISE = ['prefixes']
++        current_class.BOOTFILES = []
++        from_config(client, self.config.hosts['client'], tx)
++        self.assertEqual([(p.TYPE, p.CATEGORY, p.CLASS) for p in client.prefixes],
++                         [('fixed', 'fixed', 'fixed_lan')])
+--- a/tests/test_prefix_substitution.py
++++ b/tests/test_prefix_substitution.py
+@@ -317,4 +317,7 @@
+                 return ('20010db808388f000000000000000000', '63', 'obsolete', 'default', 1)
+
++            def get_prefix_owner(self, _prefix):
++                return None
++
+             def deactivate_prefix(self, prefix):
+                 self.deactivated.append(prefix)

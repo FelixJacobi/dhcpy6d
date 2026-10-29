@@ -32,3 +32,4 @@ e2e-artifacts/
 
 man/man7/*.7
 /mac-test-artifacts/
+startup-route-artifacts/

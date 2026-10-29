@@ -1,3 +1,15 @@
+dhcpy6d (1.7.0-1+stsblnmu7) unstable; urgency=medium
+
+  * Non-maintainer upload.
+  * Preserve valid fixed client prefix routes during startup reconciliation,
+    including existing lease databases with legacy prefix metadata.
+  * Validate fixed delegations against current client identity, class, prefix
+    and length; retain cleanup of expired or changed assignments.
+  * Add SQLite/file/SQL regression coverage and Docker startup tests against
+    real kernel routes without DHCP clients, with GitHub Actions evidence.
+
+ -- Felix Jacobi <felix.jacobi@iserv.eu>  Thu, 29 Oct 2026 02:14:30 +0100
+
 dhcpy6d (1.7.0-1+stsblnmu6) unstable; urgency=medium
 
   * Non-maintainer upload.

@@ -27,3 +27,14 @@ jobs:
         with:
           name: interface-mac-evidence
           path: mac-test-artifacts/
+  fixed-prefix-startup:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Test startup route reconciliation without DHCP clients
+        run: bash scripts/test-startup-routes.sh
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: startup-route-artifacts
+          path: startup-route-artifacts/
