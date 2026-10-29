@@ -1,5 +1,9 @@
 """Startup reconciliation with real SQLite lease rows and textfile client config."""
-import test_prefix_substitution  # configure daemon imports before importing sqlite3
+# Support both unittest discovery layouts and initialize daemon imports first.
+if __package__:
+    from . import test_prefix_substitution
+else:
+    import test_prefix_substitution
 import sqlite3
 import tempfile
 import unittest
@@ -23,7 +27,12 @@ class FixedRouteStartupTest(unittest.TestCase):
         self.addCleanup(self.temp.cleanup)
         self.db = sqlite3.connect(':memory:')
         self.addCleanup(self.db.close)
-        self.db.executescript(Path('doc/volatile.sql').read_text())
+        self.db.executescript("""
+            CREATE TABLE prefixes (prefix TEXT PRIMARY KEY, length INTEGER, active INTEGER,
+                hostname TEXT, type TEXT, category TEXT, class TEXT, mac TEXT, duid TEXT,
+                valid_until INTEGER, last_message INTEGER);
+            CREATE TABLE routes (prefix TEXT PRIMARY KEY, length INTEGER, router TEXT, last_update INTEGER);
+        """)
         columns = [row[1] for row in self.db.execute('pragma table_info(prefixes)')]
         values = dict.fromkeys(columns, 0)
         values.update(prefix=PREFIX, length=60, active=1, hostname='client',
